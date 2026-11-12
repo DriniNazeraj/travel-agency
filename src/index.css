@@ -1,0 +1,113 @@
+@import '@fontsource/fraunces/latin-600.css';
+@import '@fontsource/fraunces/latin-ext-600.css';
+@import '@fontsource/source-sans-3/latin-400.css';
+@import '@fontsource/source-sans-3/latin-ext-400.css';
+@import '@fontsource/source-sans-3/latin-500.css';
+@import '@fontsource/source-sans-3/latin-ext-500.css';
+@import '@fontsource/source-sans-3/latin-600.css';
+@import '@fontsource/source-sans-3/latin-ext-600.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: light;
+    background: #ede6d9;
+  }
+  body {
+    font-family: "Source Sans 3", "Source Sans Pro", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  :focus-visible {
+    outline: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Numbered MapLibre HTML markers */
+.map-pin {
+  width: 28px;
+  height: 28px;
+  border-radius: 9999px;
+  background: #1f3d32;
+  color: #f8f4ec;
+  font-family: "Source Sans 3", "Source Sans Pro", system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 12px;
+  display: grid;
+  place-items: center;
+  border: 2px solid #f8f4ec;
+  box-shadow: 0 2px 6px rgba(27, 25, 20, 0.25);
+  cursor: pointer;
+  pointer-events: auto;
+  transform-origin: center;
+  transition: transform 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+.map-pin.is-active {
+  background: #a8441e;
+  box-shadow: 0 0 0 4px #f8f4ec, 0 0 0 6px #a8441e, 0 2px 6px rgba(27, 25, 20, 0.25);
+}
+.map-pin:hover {
+  transform: scale(1.06);
+}
+@media (prefers-reduced-motion: reduce) {
+  .map-pin {
+    transition: none;
+  }
+  .map-pin:hover {
+    transform: none;
+  }
+}
+
+.maplibregl-ctrl-attrib {
+  font-size: 10px !important;
+  font-family: "Source Sans 3", system-ui, sans-serif !important;
+  background: rgba(248, 244, 236, 0.92) !important;
+  color: #5e574c !important;
+}
+.maplibregl-ctrl-attrib a {
+  color: #1f3d32 !important;
+}
+
+.sheet-mobile {
+  height: calc(var(--sheet-snap, 0.55) * 100dvh);
+  transition: height 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet-mobile {
+    transition: none;
+  }
+}
+@media (min-width: 1024px) {
+  .sheet-mobile {
+    height: 100%;
+    transition: none;
+  }
+}
+
+.profile-hover-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: #1f3d32;
+  border: 3px solid #f8f4ec;
+  box-shadow: 0 1px 4px rgba(27, 25, 20, 0.35);
+  pointer-events: none;
+}
+.map-pin-summit {
+  /* number sits on a mountain-tinted disc — glyph is the disc shape via a clip */
+  box-shadow: 0 2px 6px rgba(27, 25, 20, 0.25);
+}
