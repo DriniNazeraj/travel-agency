@@ -17,11 +17,12 @@ export interface MapViewProps {
   onMarkerSelect: (stopId: string) => void
   onReady?: () => void
   onFail?: () => void
-  onTerrainReady?: () => void
   cameraHost: HTMLElement | null
 }
 
 const DEM_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'
+/** Cap overzoom so climb (zoom 13–14) reuses z12 tiles instead of pulling a z14 band. */
+const DEM_MAXZOOM = 12
 
 const MOUNTAIN_SVG =
   '<svg class="map-pin-mountain" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 3 4 8 5-5 5 15H2L8 3z"/></svg>'
@@ -62,7 +63,7 @@ function isLg() {
   return typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches
 }
 
-/** 3D is allowed whenever the user (or desktop auto-on) asked for it, unless reduced motion. */
+/** 3D is allowed when the user asked for it, unless reduced motion. */
 function allow3D() {
   return typeof window !== 'undefined' && !prefersReducedMotion()
 }
@@ -98,14 +99,109 @@ function clampPad(
 
 /** MapLibre adds fit/fly `padding` on top of the transform’s persistent padding
  *  from the last camera call. After a padded flyTo (e.g. to the summit, with
- *  the sheet as bottom padding) a later fitBounds would double-count and warn
- *  “cannot fit within canvas”, leaving the camera stuck. Always zero it first. */
+ *  the sheet as bottom padding) a later cameraForBounds would double-count and
+ *  warn “cannot fit within canvas”, leaving the camera stuck. Always zero it first. */
 function resetPadding(map: maplibregl.Map) {
-  const z = { top: 0, right: 0, bottom: 0, left: 0 }
-  const cur = map.getPadding?.() ?? z
-  if (cur.top || cur.right || cur.bottom || cur.left) {
-    map.setPadding(z)
+  map.setPadding({ top: 0, right: 0, bottom: 0, left: 0 })
+}
+
+type CamMoveOpts = {
+  padding: maplibregl.PaddingOptions
+  pitch: number
+  duration: number
+  maxZoom?: number
+  bearing?: number
+}
+
+/**
+ * Stop in-flight motion, drop stale padding, compute a camera with
+ * `cameraForBounds(bounds, {padding, pitch, bearing})` (the fit math is 2D —
+ * MapLibre does not model pitch or terrain elevation), then `easeTo` that
+ * camera with the requested pitch. Retries with smaller padding if the first
+ * compute cannot fit.
+ */
+function easeToBounds(
+  map: maplibregl.Map,
+  bounds: maplibregl.LngLatBounds,
+  opts: CamMoveOpts,
+): boolean {
+  map.stop()
+  resetPadding(map)
+
+  const bearing = opts.bearing ?? 0
+  const maxZoom = opts.maxZoom ?? 14
+  const pitch = opts.pitch ?? 0
+
+  const compute = (pad: maplibregl.PaddingOptions) =>
+    map.cameraForBounds(bounds, { padding: pad, pitch, bearing, maxZoom })
+
+  let cam = compute(opts.padding)
+  if (!cam) cam = compute({ top: 48, right: 48, bottom: 48, left: 48 })
+  if (!cam) cam = compute({ top: 24, right: 24, bottom: 24, left: 24 })
+  if (!cam || cam.center == null || cam.zoom == null) return false
+
+  // A 2D-fitted zoom is tight once pitch is applied (trapezoid footprint).
+  let zoom = cam.zoom
+  if (pitch > 1) {
+    const shrink = Math.log2(Math.max(0.55, Math.cos((pitch * Math.PI) / 180)))
+    zoom = Math.min(maxZoom, Math.max(0, zoom + shrink))
   }
+
+  map.easeTo({
+    center: cam.center,
+    zoom,
+    bearing: cam.bearing ?? bearing,
+    pitch,
+    duration: Math.max(0, opts.duration),
+    essential: true,
+  })
+  return true
+}
+
+/** Frame a stop in the padded visual center without setting persistent padding. */
+function easeToPoint(
+  map: maplibregl.Map,
+  center: [number, number],
+  opts: { zoom: number; pitch: number; padding: maplibregl.PaddingOptions; duration: number },
+): boolean {
+  map.stop()
+  resetPadding(map)
+
+  const d = 0.0015
+  const bounds = new maplibregl.LngLatBounds(
+    [center[0] - d, center[1] - d],
+    [center[0] + d, center[1] + d],
+  )
+  const cam = map.cameraForBounds(bounds, {
+    padding: opts.padding,
+    pitch: opts.pitch,
+    bearing: 0,
+    maxZoom: opts.zoom,
+  })
+  if (cam && cam.center != null) {
+    map.easeTo({
+      center: cam.center,
+      zoom: opts.zoom,
+      bearing: 0,
+      pitch: opts.pitch,
+      duration: Math.max(0, opts.duration),
+      essential: true,
+    })
+    return true
+  }
+  const p = opts.padding
+  const ox = ((p.left ?? 0) - (p.right ?? 0)) / 2
+  const oy = ((p.top ?? 0) - (p.bottom ?? 0)) / 2
+  map.easeTo({
+    center,
+    zoom: opts.zoom,
+    pitch: opts.pitch,
+    bearing: 0,
+    offset: [ox, oy],
+    duration: Math.max(0, opts.duration),
+    essential: true,
+  })
+  return true
 }
 
 /** Camera padding. Phone climb uses the measured sheet overlap; desktop climb is ≥64 plus room for controls. */
@@ -255,10 +351,11 @@ function addRouteLayers(map: maplibregl.Map, trip: Trip) {
 }
 
 function addTerrainLayers(map: maplibregl.Map) {
+  if (map.getSource('dem')) return
   const demSource = new mlcontour.DemSource({
     url: DEM_URL,
     encoding: 'terrarium',
-    maxzoom: 15,
+    maxzoom: DEM_MAXZOOM,
     worker: true,
   })
   demSource.setupMaplibre(maplibregl)
@@ -268,7 +365,7 @@ function addTerrainLayers(map: maplibregl.Map) {
     encoding: 'terrarium',
     tiles: [demSource.sharedDemProtocolUrl],
     tileSize: 256,
-    maxzoom: 15,
+    maxzoom: DEM_MAXZOOM,
     attribution: 'Terrain: Mapzen / AWS Terrain Tiles',
   })
 
@@ -280,13 +377,10 @@ function addTerrainLayers(map: maplibregl.Map) {
         thresholds: {
           11: [200, 1000],
           12: [50, 250],
-          13: [50, 250],
-          14: [50, 250],
-          15: [50, 250],
         },
       }),
     ],
-    maxzoom: 15,
+    maxzoom: DEM_MAXZOOM,
   })
 
   const before = map.getLayer('route-drive-casing') ? 'route-drive-casing' : undefined
@@ -376,7 +470,6 @@ export default function MapView({
   onMarkerSelect,
   onReady,
   onFail,
-  onTerrainReady,
   cameraHost,
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -384,14 +477,11 @@ export default function MapView({
   const markersRef = useRef<maplibregl.Marker[]>([])
   const hoverMarkerRef = useRef<maplibregl.Marker | null>(null)
   const loadedRef = useRef(false)
-  const terrainReadyRef = useRef(false)
   const onReadyRef = useRef(onReady)
   const onFailRef = useRef(onFail)
-  const onTerrainReadyRef = useRef(onTerrainReady)
   const onMarkerRef = useRef(onMarkerSelect)
   onReadyRef.current = onReady
   onFailRef.current = onFail
-  onTerrainReadyRef.current = onTerrainReady
   onMarkerRef.current = onMarkerSelect
   const activeRef = useRef(activeId)
   activeRef.current = activeId
@@ -431,8 +521,7 @@ export default function MapView({
         setLegEmphasis(map, activeLegForStop(stop?.order ?? 1))
 
         // First paint is always a flat fit of the whole day — 3D stays out of this path.
-        resetPadding(map)
-        map.fitBounds(boundsFor(allRouteCoords(trip.route)), {
+        easeToBounds(map, boundsFor(allRouteCoords(trip.route)), {
           padding: padding(map, 'whole'),
           duration: 0,
           pitch: 0,
@@ -467,34 +556,21 @@ export default function MapView({
         }
 
         writeCamera(cameraHost, map)
-        onReadyRef.current?.()
-        el.classList.add('map-live')
         // MapLibre's stylesheet sets position:relative and can win over Tailwind
         // `absolute` once the lazy CSS chunk loads after index.css; the container
         // is !absolute so it fills the pane. Resize after that layout.
         map.resize()
 
-        // Terrain AFTER first paint: hillshade + contours on idle. No DEM requests before this.
-        let terrainAdded = false
-        const add = () => {
-          if (terrainAdded || cancelled || !map) return
-          terrainAdded = true
-          try {
-            addTerrainLayers(map)
-            terrainReadyRef.current = true
-            // Notify the parent after the DEM is in, so desktop can turn 3D on
-            // without putting it on the first-paint path.
-            onTerrainReadyRef.current?.()
-          } catch (err) {
-            console.warn('Terrain layers could not be added (hillshade/contours skipped):', err)
-          }
+        // Reveal (cross-fade from the skeleton) on the first idle — the route
+        // is on the map, and no DEM has been requested. Hillshade/contours/3D
+        // DEM wait for climb or an explicit 3D toggle.
+        const reveal = () => {
+          if (cancelled) return
+          onReadyRef.current?.()
+          el.classList.add('map-live')
+          map?.resize()
         }
-        map.once('idle', add)
-        if (typeof requestIdleCallback === 'function') {
-          requestIdleCallback(add, { timeout: 2500 })
-        } else {
-          setTimeout(add, 50)
-        }
+        map.once('idle', reveal)
       })
 
       map.on('moveend', () => {
@@ -560,29 +636,28 @@ export default function MapView({
 
     let cancelled = false
     const frameClimb = async (pitch: number, duration: number) => {
-      // If 3D is requested, wait until the DEM terrain is actually on and idle
-      // before fitting — otherwise the hike ends up off-canvas once pitch applies.
+      // Move immediately — do not wait for DEM idle first (that left an
+      // in-flight flyTo running and let cancelled flags swallow the fit).
+      // If 3D is on, attach terrain, then compute in 2D and easeTo with pitch.
       if (pitch > 0) {
-        if (!map.getSource('dem')) return
-        if (!map.getTerrain()) {
+        addTerrainLayers(map)
+        if (map.getSource('dem') && !map.getTerrain()) {
           try {
             map.setTerrain({ source: 'dem', exaggeration: 1.3 })
           } catch {
-            return
+            // Still frame in 2D with pitch; terrain can catch up.
           }
         }
-        await waitIdle(map, 2000)
-        if (cancelled) return
       }
-      const pad = padding(map, 'climb')
-      map.stop()
-      resetPadding(map)
-      map.fitBounds(hikeBounds(trip), {
-        padding: pad,
+      if (cancelled) return
+      const ok = easeToBounds(map, hikeBounds(trip), {
+        padding: padding(map, 'climb'),
+        pitch,
         duration,
         maxZoom: 14,
-        pitch,
+        bearing: 0,
       })
+      if (!ok) return
       await waitIdle(map, 2000)
       if (cancelled) return
       refreshMarkers(markersRef.current)
@@ -590,16 +665,19 @@ export default function MapView({
 
     if (only3d) {
       if (mode === 'climb') {
+        addTerrainLayers(map)
         void frameClimb(wantPitch('climb'), reduced ? 0 : 700)
       } else if (mode === 'whole') {
         if (map.getPitch() > 0.5) {
-          map.easeTo({ pitch: 0, duration: reduced ? 0 : 400 })
+          map.stop()
+          map.easeTo({ pitch: 0, duration: reduced ? 0 : 400, essential: true })
         }
       } else {
         const stop = trip.stops.find((s) => s.id === activeId)
         const pitch = wantPitch('stop', stop?.order)
         if (Math.abs(map.getPitch() - pitch) > 1) {
-          map.easeTo({ pitch, duration: reduced ? 0 : 500 })
+          map.stop()
+          map.easeTo({ pitch, duration: reduced ? 0 : 500, essential: true })
         }
       }
       return () => {
@@ -607,17 +685,18 @@ export default function MapView({
       }
     }
 
-    map.stop()
     if (mode === 'whole') {
-      resetPadding(map)
-      map.fitBounds(boundsFor(allRouteCoords(trip.route)), {
+      easeToBounds(map, boundsFor(allRouteCoords(trip.route)), {
         padding: padding(map, 'whole'),
         duration: reduced ? 0 : 800,
         pitch: 0,
       })
-      return
+      return () => {
+        cancelled = true
+      }
     }
     if (mode === 'climb') {
+      addTerrainLayers(map)
       void frameClimb(wantPitch('climb'), reduced ? 0 : 800)
       return () => {
         cancelled = true
@@ -625,50 +704,40 @@ export default function MapView({
     }
     const stop: Stop | undefined = trip.stops.find((s) => s.id === activeId)
     if (!stop) return
-    const camera = {
-      center: [stop.lng, stop.lat] as [number, number],
+    easeToPoint(map, [stop.lng, stop.lat], {
       zoom: 13,
       padding: padding(map, 'stop'),
       pitch: wantPitch('stop', stop.order),
+      duration: reduced ? 0 : 800,
+    })
+    return () => {
+      cancelled = true
     }
-    resetPadding(map)
-    if (reduced) map.jumpTo({ center: camera.center, zoom: camera.zoom, pitch: 0 })
-    else map.flyTo({ ...camera, duration: 800 })
   }, [activeId, mode, trip, terrain3d])
 
-  // 3D terrain source: set after the DEM is on the map, then re-frame the climb on idle.
+  // 3D terrain source: attach or detach DEM. Camera motion is owned by the
+  // camera effect (terrain3d is in its deps) so this does not start a competing
+  // fitBounds — that race left The climb stuck on the previous stop.
   useEffect(() => {
     const map = mapRef.current
     if (!map || !loadedRef.current) return
     const on = terrain3d && allow3D()
     let cancelled = false
     const apply = async () => {
-      if (!map.getSource('dem')) return false
       try {
         if (on) {
+          addTerrainLayers(map)
+          if (!map.getSource('dem')) return false
           if (!map.getTerrain()) map.setTerrain({ source: 'dem', exaggeration: 1.3 })
           await waitIdle(map, 2000)
           if (cancelled) return true
           refreshMarkers(markersRef.current)
-          // Camera effect also frames; do it here too so a late setTerrain
-          // after a 2D climb fit gets a correct pitched frame.
-          if (modeRef.current === 'climb') {
-            const reduced = prefersReducedMotion()
-            map.stop()
-            resetPadding(map)
-            map.fitBounds(hikeBounds(trip), {
-              padding: padding(map, 'climb'),
-              duration: reduced ? 0 : 700,
-              maxZoom: 14,
-              pitch: 50,
-            })
-            await waitIdle(map, 2000)
-            if (!cancelled) refreshMarkers(markersRef.current)
-          }
+          return true
         } else if (map.getTerrain()) {
           map.setTerrain(null)
           if (map.getPitch() > 0.5 && modeRef.current === 'whole') {
-            map.easeTo({ pitch: 0, duration: prefersReducedMotion() ? 0 : 400 })
+            map.stop()
+            map.easeTo({ pitch: 0, duration: prefersReducedMotion() ? 0 : 400, essential: true })
           }
           refreshMarkers(markersRef.current)
         }
@@ -689,7 +758,7 @@ export default function MapView({
       clearInterval(t)
       clearTimeout(kill)
     }
-  }, [terrain3d, mode, trip])
+  }, [terrain3d])
 
   // Elevation-profile scrubber marker
   useEffect(() => {

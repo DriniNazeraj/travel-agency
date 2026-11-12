@@ -118,19 +118,172 @@ async function assertLegendClearOfAttribution(page, name) {
   return info
 }
 
+function isDemUrl(u) {
+  return /elevation-tiles-prod|\/terrarium\//i.test(u)
+}
+function isMapViewChunk(u) {
+  return /\/assets\/MapView-.*\.js(?:\?|$)/.test(u)
+}
+function demZoom(u) {
+  const m = u.match(/terrarium\/(\d+)\//)
+  return m ? Number(m[1]) : null
+}
+
+const STEP_PLACE = {
+  1: 'kafe-flora',
+  2: 'rest-shkoder',
+  3: 'lepushe',
+  4: 'maja-e-vajushes',
+  5: 'lepushe',
+  6: 'rest-shkoder',
+  7: 'kafe-flora',
+}
+
+/** Desktop climb padding from MapView — used to assert pins sit in the padded viewport. */
+const CLIMB_PAD = { top: 128, right: 120, bottom: 88, left: 80 }
+
+function pinStateInPage() {
+  const host = document.querySelector('[data-map-ready="true"]')
+  const canvas = document.querySelector('.maplibregl-canvas')
+  const pane = document.querySelector('[data-testid="map-pane"]')
+  const mapEl = canvas || pane
+  const r = mapEl?.getBoundingClientRect()
+  const pins = [...document.querySelectorAll('.map-pin')].map((p) => {
+    const b = p.getBoundingClientRect()
+    return {
+      placeId: p.dataset.placeId,
+      active: p.classList.contains('is-active'),
+      x: b.x,
+      y: b.y,
+      w: b.width,
+      h: b.height,
+      cx: b.x + b.width / 2,
+      cy: b.y + b.height / 2,
+    }
+  })
+  return {
+    map: r ? { x: r.x, y: r.y, w: r.width, h: r.height } : null,
+    pins,
+    camera: {
+      lng: host?.getAttribute('data-map-lng'),
+      lat: host?.getAttribute('data-map-lat'),
+      zoom: host?.getAttribute('data-map-zoom'),
+      pitch: host?.getAttribute('data-map-pitch'),
+    },
+    mode: document.querySelector('[data-map-mode]')?.getAttribute('data-map-mode'),
+    terrain: document.querySelector('[data-testid="terrain-3d"]')?.getAttribute('aria-pressed'),
+  }
+}
+
+function pinInside(pin, map, pad, slop = 20) {
+  if (!pin || !map) return false
+  return (
+    pin.cx >= map.x + pad.left - slop &&
+    pin.cx <= map.x + map.w - pad.right + slop &&
+    pin.cy >= map.y + pad.top - slop &&
+    pin.cy <= map.y + map.h - pad.bottom + slop
+  )
+}
+
+function pinOnCanvas(pin, map, slop = 8) {
+  if (!pin || !map) return false
+  return (
+    pin.cx >= map.x - slop &&
+    pin.cx <= map.x + map.w + slop &&
+    pin.cy >= map.y - slop &&
+    pin.cy <= map.y + map.h + slop
+  )
+}
+
+async function readPins(page) {
+  return page.evaluate(pinStateInPage)
+}
+
+async function waitClimbFramed(page, timeout = 12000) {
+  const t0 = Date.now()
+  let last = null
+  while (Date.now() - t0 < timeout) {
+    last = await readPins(page)
+    const p3 = last.pins.find((p) => p.placeId === 'lepushe')
+    const p4 = last.pins.find((p) => p.placeId === 'maja-e-vajushes')
+    const in3 = pinInside(p3, last.map, CLIMB_PAD)
+    const in4 = pinInside(p4, last.map, CLIMB_PAD)
+    const zoom = parseFloat(last.camera.zoom ?? '0')
+    const lat = parseFloat(last.camera.lat ?? '0')
+    if (last.mode === 'climb' && in3 && in4 && zoom >= 11 && lat > 42.4 && lat < 42.65) {
+      return { ...last, in3, in4, ok: true }
+    }
+    await page.waitForTimeout(150)
+  }
+  const p3 = last?.pins.find((p) => p.placeId === 'lepushe')
+  const p4 = last?.pins.find((p) => p.placeId === 'maja-e-vajushes')
+  return {
+    ...last,
+    in3: pinInside(p3, last?.map, CLIMB_PAD),
+    in4: pinInside(p4, last?.map, CLIMB_PAD),
+    ok: false,
+  }
+}
+
+async function waitPinOnCanvas(page, placeId, timeout = 10000) {
+  const t0 = Date.now()
+  let last = null
+  while (Date.now() - t0 < timeout) {
+    last = await readPins(page)
+    const pin = last.pins.find((p) => p.placeId === placeId)
+    if (pinOnCanvas(pin, last.map)) return { ...last, pin, ok: true }
+    await page.waitForTimeout(150)
+  }
+  const pin = last?.pins.find((p) => p.placeId === placeId)
+  return { ...last, pin, ok: false }
+}
+
+
 async function runAt(browser, { name, width, height, alsoClimb = true }) {
   const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 2 })
   const pageErrors = []
   const http404s = []
+  const mapViewReqs = []
+  const demReqs = []
+  const demBodyWaits = []
+  let loadFired = false
+  let interacted = false
   page.on('console', (msg) => {
     if (msg.type() === 'error') pageErrors.push(`[console] ${msg.text()}`)
   })
   page.on('pageerror', (err) => pageErrors.push(`[pageerror] ${err.message}`))
+  page.on('load', () => {
+    loadFired = true
+  })
+  page.on('request', (req) => {
+    const u = req.url()
+    if (isMapViewChunk(u)) {
+      mapViewReqs.push({ url: u.replace(/^https?:\/\/[^/]+/, ''), afterLoad: loadFired, afterInteract: interacted })
+    }
+  })
   page.on('response', (res) => {
     const status = res.status()
     const u = res.url()
     if (status >= 400 && !/favicon/.test(u)) {
       http404s.push({ url: u, status })
+    }
+    if (isDemUrl(u)) {
+      const rec = {
+        url: u,
+        status,
+        bytes: Number(res.headers()['content-length'] || 0),
+        z: demZoom(u),
+        afterLoad: loadFired,
+        afterInteract: interacted,
+      }
+      demReqs.push(rec)
+      demBodyWaits.push(
+        res.body()
+          .then((b) => {
+            rec.bytes = b.length
+          })
+          .catch(() => {}),
+      )
     }
   })
 
@@ -138,11 +291,45 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
   await page.waitForSelector('h1', { timeout: 10000 })
   await page.waitForSelector('button[data-step="4"]', { timeout: 10000 })
   await page.waitForSelector('[data-testid="map-attribution"]', { timeout: 5000 })
-  // First-paint (skeleton may still be showing)
+  // First-paint (skeleton may still be showing) — LCP should be this, not the map.
   await page.screenshot({ path: path.join(shots, `${name}-initial.png`), fullPage: false })
-  // Wait for MapLibre to report a camera so the drive shot has live tiles + route
-  await page.waitForSelector('[data-map-ready="true"]', { timeout: 20000 }).catch(() => {})
-  await page.waitForTimeout(800)
+  // MapView starts after window load + requestIdleCallback; allow a longer wait.
+  await page.waitForSelector('[data-map-ready="true"]', { timeout: 25000 }).catch(() => {})
+  // Settle: any wrongly-eager DEM would show up here, before we interact.
+  await page.waitForTimeout(1500)
+  await Promise.all(demBodyWaits)
+  const firstViewDem = demReqs.filter((d) => !d.afterInteract).map((d) => ({ url: d.url, bytes: d.bytes, z: d.z }))
+  const mapViewBeforeLoad = mapViewReqs.filter((r) => !r.afterLoad)
+  if (width >= 1280 && firstViewDem.length) {
+    throw new Error(`${name}: DEM requests before interaction at desktop first view: ${JSON.stringify(firstViewDem)}`)
+  }
+  if (mapViewBeforeLoad.length) {
+    throw new Error(`${name}: MapView chunk requested before load event: ${JSON.stringify(mapViewBeforeLoad)}`)
+  }
+  let paneAria = null
+  if (width === 390) {
+    // Drawer has mounted by now; vaul must not aria-hide the live map.
+    paneAria = await page.evaluate(() => {
+      const pane = document.querySelector('[data-testid="map-pane"]')
+      if (!pane) return { ok: false, reason: 'no-pane' }
+      const chain = []
+      let n = pane
+      while (n && n !== document.body) {
+        if (n.getAttribute('aria-hidden') === 'true') {
+          chain.push({
+            tag: n.tagName,
+            testid: n.getAttribute('data-testid'),
+            className: (n.className || '').toString().slice(0, 100),
+          })
+        }
+        n = n.parentElement
+      }
+      return { ok: chain.length === 0 && pane.getAttribute('aria-hidden') !== 'true', chain, ready: pane.getAttribute('data-map-ready') }
+    })
+    if (!paneAria.ok) {
+      throw new Error(`${name}: map pane is aria-hidden at 390: ${JSON.stringify(paneAria)}`)
+    }
+  }
   await page.screenshot({ path: path.join(shots, `${name}-drive.png`), fullPage: false })
 
   const attrib = await assertAttributionVisible(page, `${name}-drive`)
@@ -161,6 +348,7 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
     }
   })
 
+  interacted = true
   await page.locator('button[data-step="4"]').click()
 
   await page.waitForFunction(() => {
@@ -205,6 +393,7 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
   }
 
   let climbShot = null
+  let firstClimbDem = null
   if (alsoClimb) {
     // Return to whole day then open The climb (inset or toggle)
     const climbBtn = page.locator('[data-testid="view-climb"]')
@@ -218,6 +407,14 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
       await page.waitForTimeout(1200)
       await page.screenshot({ path: path.join(shots, `${name}-climb.png`), fullPage: false })
       climbShot = `${name}-climb.png`
+      await Promise.all(demBodyWaits)
+      // Snapshot DEM used for the first climb, before the later 3D keyboard tour.
+      firstClimbDem = {
+        count: demReqs.filter((d) => d.afterInteract && d.status < 400).length,
+        bytes: demReqs.filter((d) => d.afterInteract && d.status < 400).reduce((s, d) => s + (d.bytes || 0), 0),
+        maxZ: demReqs.filter((d) => d.afterInteract && d.status < 400).reduce((m, d) => Math.max(m, d.z ?? 0), 0),
+        overzoom: demReqs.filter((d) => d.afterInteract && d.status < 400 && (d.z ?? 0) > 12).length,
+      }
       // Attribution must still be clear in climb view
       await assertAttributionVisible(page, `${name}-climb`)
       if (width === 390) {
@@ -352,6 +549,87 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
     await page.screenshot({ path: path.join(shots, `${name}-sheet-full.png`), fullPage: false })
   }
 
+  // --- Desktop 3D on: climb → step 1 → climb again → keyboard through steps ---
+  let terrain3d = null
+  if (width >= 1280) {
+    const toggle = page.locator('[data-testid="terrain-3d"]')
+    if (await toggle.getAttribute('aria-pressed') !== 'true') {
+      await toggle.click()
+    }
+    await page.waitForFunction(
+      () => document.querySelector('[data-testid="terrain-3d"]')?.getAttribute('aria-pressed') === 'true',
+      { timeout: 5000 },
+    )
+
+    const climbBtn = page.locator('[data-testid="view-climb"]')
+    await climbBtn.click()
+    const climb1 = await waitClimbFramed(page)
+    await page.screenshot({ path: path.join(shots, `${name}-3d-climb.png`), fullPage: false })
+    if (!climb1.ok) {
+      throw new Error(`${name}: 3D The climb did not frame Lëpushë and the summit in the padded viewport: ${JSON.stringify(climb1)}`)
+    }
+
+    await page.locator('button[data-step="1"]').click()
+    const step1 = await waitPinOnCanvas(page, STEP_PLACE[1])
+    await page.screenshot({ path: path.join(shots, `${name}-3d-step1.png`), fullPage: false })
+    if (!step1.ok) {
+      throw new Error(`${name}: 3D step 1 target not on-canvas: ${JSON.stringify(step1)}`)
+    }
+
+    await climbBtn.click()
+    const climb2 = await waitClimbFramed(page)
+    await page.screenshot({ path: path.join(shots, `${name}-3d-climb-again.png`), fullPage: false })
+    if (!climb2.ok) {
+      throw new Error(`${name}: 3D The climb after step 1 did not re-frame the hike: ${JSON.stringify(climb2)}`)
+    }
+
+    // Keyboard ArrowDown / ArrowUp through every step; each target must stay on-canvas.
+    await page.locator('button[data-step="1"]').click()
+    const firstKb = await waitPinOnCanvas(page, STEP_PLACE[1])
+    if (!firstKb.ok) {
+      throw new Error(`${name}: 3D keyboard start (step 1) not on-canvas: ${JSON.stringify(firstKb)}`)
+    }
+    await page.locator('button[data-step="1"]').focus()
+    const kbSteps = []
+    for (let step = 2; step <= 7; step++) {
+      await page.keyboard.press('ArrowDown')
+      await page.waitForFunction(
+        (n) => document.querySelector(`button[data-step="${n}"]`)?.getAttribute('data-active') === 'true',
+        step,
+        { timeout: 5000 },
+      )
+      const st = await waitPinOnCanvas(page, STEP_PLACE[step])
+      kbSteps.push({ dir: 'down', step, ok: st.ok, camera: st.camera, pin: st.pin })
+      if (!st.ok) {
+        await page.screenshot({ path: path.join(shots, `${name}-3d-kb-down-${step}.png`), fullPage: false })
+        throw new Error(`${name}: 3D ArrowDown step ${step} target not on-canvas: ${JSON.stringify(st)}`)
+      }
+    }
+    await page.screenshot({ path: path.join(shots, `${name}-3d-kb-down.png`), fullPage: false })
+    for (let step = 6; step >= 1; step--) {
+      await page.keyboard.press('ArrowUp')
+      await page.waitForFunction(
+        (n) => document.querySelector(`button[data-step="${n}"]`)?.getAttribute('data-active') === 'true',
+        step,
+        { timeout: 5000 },
+      )
+      const st = await waitPinOnCanvas(page, STEP_PLACE[step])
+      kbSteps.push({ dir: 'up', step, ok: st.ok, camera: st.camera, pin: st.pin })
+      if (!st.ok) {
+        await page.screenshot({ path: path.join(shots, `${name}-3d-kb-up-${step}.png`), fullPage: false })
+        throw new Error(`${name}: 3D ArrowUp step ${step} target not on-canvas: ${JSON.stringify(st)}`)
+      }
+    }
+    await page.screenshot({ path: path.join(shots, `${name}-3d-kb-up.png`), fullPage: false })
+    terrain3d = {
+      ok: climb1.ok && step1.ok && climb2.ok && kbSteps.every((s) => s.ok),
+      climb1: { ok: climb1.ok, in3: climb1.in3, in4: climb1.in4, camera: climb1.camera, mode: climb1.mode },
+      step1: { ok: step1.ok, camera: step1.camera, pin: step1.pin },
+      climb2: { ok: climb2.ok, in3: climb2.in3, in4: climb2.in4, camera: climb2.camera, mode: climb2.mode },
+      kbSteps,
+    }
+  }
+
   // 404s: glyph and other app requests must not 404. Allow aborted DEM/OSM tiles (pan/cancel).
   const real404s = http404s.filter((r) => {
     if (/favicon/.test(r.url)) return false
@@ -375,8 +653,43 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
   const glyphErr = pageErrors.filter((e) => /demotiles\.maplibre|\/glyphs\//.test(e))
   errors.push(...real.map((e) => `${name}: ${e}`))
   errors.push(...glyphErr.filter((e) => !real.includes(e)).map((e) => `${name}: ${e}`))
+  await Promise.all(demBodyWaits)
+  const climbDemReqs = demReqs.filter((d) => d.afterInteract && d.status < 400)
+  const climbDemTotal = {
+    count: climbDemReqs.length,
+    bytes: climbDemReqs.reduce((s, d) => s + (d.bytes || 0), 0),
+    maxZ: climbDemReqs.reduce((m, d) => Math.max(m, d.z ?? 0), 0),
+    overzoom: climbDemReqs.filter((d) => (d.z ?? 0) > 12).length,
+  }
+  const climbDem = firstClimbDem ?? climbDemTotal
+  const firstViewDemReport = {
+    count: firstViewDem.length,
+    bytes: firstViewDem.reduce((s, d) => s + (d.bytes || 0), 0),
+  }
   await page.close()
-  return { name, width, height, stepChanged, mapMoved, before, after, attrib, legend, climbShot, step7AtEnd, touchScrub, http404s: real404s, consoleErrors: real }
+  return {
+    name,
+    width,
+    height,
+    stepChanged,
+    mapMoved,
+    before,
+    after,
+    attrib,
+    legend,
+    climbShot,
+    step7AtEnd,
+    touchScrub,
+    http404s: real404s,
+    consoleErrors: real,
+    firstViewDem: firstViewDemReport,
+    mapViewBeforeLoad,
+    mapViewReqs,
+    paneAria,
+    climbDem,
+    climbDemTotal,
+    terrain3d,
+  }
 }
 
 const browser = await chromium.launch({
@@ -419,5 +732,31 @@ if (results.some((r) => (r.http404s ?? []).some((x) => /demotiles|glyphs/.test(x
   console.error('FAIL: glyph or demotiles 404')
   process.exit(1)
 }
+if (results.some((r) => r.width >= 1280 && (r.firstViewDem?.count ?? 0) > 0)) {
+  console.error('FAIL: DEM requests before interaction at desktop first view')
+  process.exit(1)
+}
+if (results.some((r) => (r.mapViewBeforeLoad ?? []).length > 0)) {
+  console.error('FAIL: MapView chunk requested before load event')
+  process.exit(1)
+}
+if (results.some((r) => r.width === 390 && !r.paneAria?.ok)) {
+  console.error('FAIL: map pane is aria-hidden at 390')
+  process.exit(1)
+}
+if (results.some((r) => r.width >= 1280 && !r.terrain3d?.ok)) {
+  const bad = results.filter((r) => r.width >= 1280 && !r.terrain3d?.ok)
+  console.error('FAIL: 3D climb / keyboard camera', JSON.stringify(bad.map((r) => ({ name: r.name, terrain3d: r.terrain3d })), null, 2))
+  process.exit(1)
+}
 console.log('SMOKE OK')
+for (const r of results) {
+  const cd = r.climbDem
+  console.log(
+    `${r.name}: firstView DEM ${r.firstViewDem?.count ?? 0} (${r.firstViewDem?.bytes ?? 0} B); climb DEM ${cd?.count ?? 0} tiles / ${cd?.bytes ?? 0} B (max z=${cd?.maxZ ?? '?'}, z>12: ${cd?.overzoom ?? '?'}); MapView before load: ${(r.mapViewBeforeLoad ?? []).length}` +
+      (r.terrain3d
+        ? `; 3D climb1=${r.terrain3d.climb1?.ok} climb2=${r.terrain3d.climb2?.ok} kb=${(r.terrain3d.kbSteps ?? []).filter((s) => s.ok).length}/${(r.terrain3d.kbSteps ?? []).length}`
+        : ''),
+  )
+}
 console.log('screenshots:', fs.readdirSync(shots).join(', '))

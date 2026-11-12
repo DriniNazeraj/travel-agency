@@ -105,7 +105,6 @@ function TripScreen({ trip: t }: { trip: Trip }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const observeLockRef = useRef(false)
   const lockTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const userSet3d = useRef(false)
   // Vaul reads `document` at render, so it cannot run during prerender.
   // SSR and the first client paint use a static sheet (same markup, one h1);
   // after mount on the phone we wrap it in the drawer for drag/snaps.
@@ -119,17 +118,9 @@ function TripScreen({ trip: t }: { trip: Trip }) {
   }, [])
 
 
+  // 3D is off at every width until the user opts in with the toggle.
   const onTerrain3d = useCallback((on: boolean) => {
-    userSet3d.current = true
     setTerrain3d(on)
-  }, [])
-
-  const onTerrainReady = useCallback(() => {
-    if (userSet3d.current) return
-    if (prefersReducedMotion()) return
-    if (typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches) {
-      setTerrain3d(true)
-    }
   }, [])
 
   const selectStop = useCallback(
@@ -221,7 +212,6 @@ function TripScreen({ trip: t }: { trip: Trip }) {
           snap={snap}
           terrain3d={terrain3d}
           onTerrain3d={onTerrain3d}
-          onTerrainReady={onTerrainReady}
           hoverLngLat={hoverLngLat}
           onModeChange={onModeChange}
           onMarkerSelect={(id) => selectStop(id, 'marker')}
