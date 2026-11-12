@@ -1,0 +1,51 @@
+{
+  "name": "hiking-itinerary",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "L\u00ebpush\u00eb to Maja e Vajush\u00ebs itinerary-on-a-map for an Albanian travel/hiking company. Placeholder client data is marked [PH].",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc -p . --noEmit",
+    "build": "tsc -p . --noEmit && node scripts/make-og.mjs && vite build && vite build --ssr src/entry-server.tsx --outDir dist-ssr && tsx scripts/prerender.ts",
+    "preview": "vite preview --host 0.0.0.0 --port 4174",
+    "serve:prod": "node scripts/serve-prod.mjs 4174",
+    "smoke": "node scripts/smoke.mjs",
+    "og": "node scripts/make-og.mjs",
+    "build-route": "node scripts/build-route.mjs"
+  },
+  "dependencies": {
+    "@fontsource/fraunces": "^5.2.8",
+    "@fontsource/source-sans-3": "^5.2.8",
+    "@radix-ui/react-checkbox": "^1.3.3",
+    "@radix-ui/react-scroll-area": "^1.2.10",
+    "@radix-ui/react-separator": "^1.1.7",
+    "@radix-ui/react-slot": "^1.2.3",
+    "@radix-ui/react-toggle": "^1.1.10",
+    "@radix-ui/react-toggle-group": "^1.1.11",
+    "@radix-ui/react-tooltip": "^1.2.8",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.511.0",
+    "maplibre-contour": "^0.1.1",
+    "maplibre-gl": "^5.6.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.1",
+    "tailwind-merge": "^2.6.0",
+    "vaul": "^1.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "@types/react": "^18.3.21",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.5.2",
+    "autoprefixer": "^10.4.21",
+    "playwright": "^1.52.0",
+    "postcss": "^8.5.3",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vite": "^5.4.19"
+  }
+}
