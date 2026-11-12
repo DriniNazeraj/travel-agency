@@ -9,7 +9,7 @@ const badgeVariants = cva(
       variant: {
         moss: 'border border-moss text-moss bg-surface',
         clay: 'text-clay',
-        ph: 'border border-dashed border-clay/50 bg-sand/40 text-clay',
+        ph: 'border border-dashed border-clay-deep/50 bg-sand/40 text-clay-deep',
       },
     },
     defaultVariants: { variant: 'moss' },

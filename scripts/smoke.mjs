@@ -79,13 +79,60 @@ async function assertAttributionVisible(page, name) {
   return info
 }
 
+
+async function assertLegendClearOfAttribution(page, name) {
+  const info = await page.evaluate(() => {
+    const a = document.querySelector('[data-testid="map-attribution"]')
+    const l = document.querySelector('[data-testid="route-legend"]')
+    if (!a || !l) return { ok: false, reason: 'missing', hasA: !!a, hasL: !!l }
+    const ar = a.getBoundingClientRect()
+    const lr = l.getBoundingClientRect()
+    const intersect = !(
+      ar.right <= lr.left ||
+      ar.left >= lr.right ||
+      ar.bottom <= lr.top ||
+      ar.top >= lr.bottom
+    )
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const legendInView = lr.width > 0 && lr.height > 0 && lr.bottom > 0 && lr.top < vh && lr.left < vw && lr.right > 0
+    const mid = [lr.left + lr.width / 2, lr.top + lr.height / 2]
+    const hit = document.elementFromPoint(mid[0], mid[1])
+    const coveredBySheet = !!(hit && hit.closest('[data-sheet]'))
+    const isSelf = !!(hit && (hit === l || l.contains(hit) || hit.closest('[data-testid="route-legend"]')))
+    return {
+      ok: !intersect && legendInView && !coveredBySheet && isSelf,
+      intersect,
+      legendInView,
+      coveredBySheet,
+      isSelf,
+      ar: { top: ar.top, left: ar.left, right: ar.right, bottom: ar.bottom, width: ar.width, height: ar.height },
+      lr: { top: lr.top, left: lr.left, right: lr.right, bottom: lr.bottom, width: lr.width, height: lr.height },
+      vw,
+      vh,
+    }
+  })
+  if (!info.ok) {
+    throw new Error(`${name}: legend intersects attribution or is obscured: ${JSON.stringify(info)}`)
+  }
+  return info
+}
+
 async function runAt(browser, { name, width, height, alsoClimb = true }) {
   const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 2 })
   const pageErrors = []
+  const http404s = []
   page.on('console', (msg) => {
     if (msg.type() === 'error') pageErrors.push(`[console] ${msg.text()}`)
   })
   page.on('pageerror', (err) => pageErrors.push(`[pageerror] ${err.message}`))
+  page.on('response', (res) => {
+    const status = res.status()
+    const u = res.url()
+    if (status >= 400 && !/favicon/.test(u)) {
+      http404s.push({ url: u, status })
+    }
+  })
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
   await page.waitForSelector('h1', { timeout: 10000 })
@@ -99,6 +146,11 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
   await page.screenshot({ path: path.join(shots, `${name}-drive.png`), fullPage: false })
 
   const attrib = await assertAttributionVisible(page, `${name}-drive`)
+  // Designer: legend and attribution must not overlap at 390px (phone).
+  let legend = null
+  if (width === 390) {
+    legend = await assertLegendClearOfAttribution(page, `${name}-drive`)
+  }
 
   const before = await page.evaluate(() => {
     const host = document.querySelector('[data-active-stop]')
@@ -163,11 +215,153 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
         const z = parseFloat(document.querySelector('[data-map-ready="true"]')?.getAttribute('data-map-zoom') ?? '0')
         return z >= 11
       }, { timeout: 12000 }).catch(() => {})
-      await page.waitForTimeout(400)
+      await page.waitForTimeout(1200)
       await page.screenshot({ path: path.join(shots, `${name}-climb.png`), fullPage: false })
       climbShot = `${name}-climb.png`
       // Attribution must still be clear in climb view
       await assertAttributionVisible(page, `${name}-climb`)
+      if (width === 390) {
+        legend = await assertLegendClearOfAttribution(page, `${name}-climb`)
+      }
+    }
+  }
+
+  // --- Desktop: scrolling the 420px rail to the end must activate step 7 ---
+  let step7AtEnd = null
+  if (width >= 1280) {
+    await page.locator('[data-testid="view-whole"]').click().catch(() => {})
+    step7AtEnd = await page.evaluate(async () => {
+      const root = document.querySelector('[data-timeline-scroll]')
+      if (!root) return { ok: false, reason: 'no-scroll-root' }
+      root.scrollTop = root.scrollHeight
+      // Allow the scroll-follow listener to run.
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+      await new Promise((r) => setTimeout(r, 120))
+      root.dispatchEvent(new Event('scroll'))
+      await new Promise((r) => setTimeout(r, 200))
+      const btn = document.querySelector('button[data-step="7"]')
+      const host = document.querySelector('[data-active-stop]')
+      return {
+        ok: btn?.getAttribute('data-active') === 'true' || host?.getAttribute('data-active-stop')?.includes('arrive-tirana'),
+        active: host?.getAttribute('data-active-stop'),
+        btnActive: btn?.getAttribute('data-active'),
+        scrollTop: root.scrollTop,
+        scrollHeight: root.scrollHeight,
+        clientHeight: root.clientHeight,
+      }
+    })
+    if (!step7AtEnd.ok) {
+      throw new Error(`${name}: step 7 did not activate at rail end: ${JSON.stringify(step7AtEnd)}`)
+    }
+  }
+
+  // --- Phone: touch-scrub the elevation profile and expect the map dot / live text to change ---
+  let touchScrub = null
+  if (width === 390) {
+    // Expand the sheet so the profile is on screen, then scrub.
+    const handle = page.locator('[data-testid="sheet-handle"]')
+    if (await handle.count()) {
+      await handle.click()
+      await page.waitForTimeout(400)
+    }
+    await page.locator('#climb-profile').scrollIntoViewIfNeeded()
+    const svg = page.locator('#climb-profile svg[tabindex="0"], #climb-profile svg')
+    await svg.waitFor({ state: 'visible', timeout: 5000 })
+    const box = await svg.boundingBox()
+    if (box) {
+      const beforeLive = await page.evaluate(() => document.querySelector('#climb-profile [aria-live]')?.textContent ?? '')
+      // Pointer events (Playwright dispatches pointer* which our handler listens to)
+      const startX = box.x + box.width * 0.2
+      const endX = box.x + box.width * 0.8
+      const y = box.y + box.height * 0.5
+      await page.mouse.move(startX, y)
+      await page.mouse.down()
+      await page.mouse.move(endX, y, { steps: 8 })
+      await page.mouse.up()
+      // Also dispatch a touch-style pointer on the element for the touch path
+      await page.evaluate(({ sx, ex, y }) => {
+        const el = document.querySelector('#climb-profile .touch-none, #climb-profile [style]') ?? document.querySelector('#climb-profile svg')?.parentElement
+        if (!el) return
+        const fire = (type, x) => {
+          const ev = new PointerEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            pointerId: 1,
+            pointerType: 'touch',
+            clientX: x,
+            clientY: y,
+            buttons: type === 'pointerup' ? 0 : 1,
+          })
+          el.dispatchEvent(ev)
+        }
+        fire('pointerdown', sx)
+        fire('pointermove', ex)
+      }, { sx: startX, ex: endX, y })
+      await page.waitForTimeout(200)
+      touchScrub = await page.evaluate((before) => {
+        const live = document.querySelector('#climb-profile [aria-live]')?.textContent ?? ''
+        const hover = document.querySelector('#climb-profile svg circle[stroke], #climb-profile svg g circle[r="6"]')
+        const mapDot = document.querySelector('.profile-hover-dot')
+        const changed = live !== before && /km/.test(live)
+        return { ok: changed || !!hover || !!mapDot, live, before, hasHoverCircle: !!hover, hasMapDot: !!mapDot }
+      }, beforeLive)
+      if (!touchScrub.ok) {
+        throw new Error(`${name}: elevation touch-scrub did not move the marker: ${JSON.stringify(touchScrub)}`)
+      }
+    } else {
+      throw new Error(`${name}: elevation profile SVG has no box`)
+    }
+
+    // Sheet-full: attribution still visible, not covered, legend does not overlap it
+    const fullAttrib = await assertAttributionVisible(page, `${name}-sheet-full`)
+    // Legend may sit under the wordmark at full snap — it must not intersect attribution
+    // and must not be covered by the sheet.
+    const fullLegend = await page.evaluate(() => {
+      const a = document.querySelector('[data-testid="map-attribution"]')
+      const l = document.querySelector('[data-testid="route-legend"]')
+      const sheet = document.querySelector('[data-sheet]')
+      if (!a) return { ok: false, reason: 'no-attrib' }
+      const ar = a.getBoundingClientRect()
+      const sr = sheet?.getBoundingClientRect()
+      const covered = sr && ar.bottom > sr.top + 2 && ar.top < sr.bottom && ar.right > sr.left && ar.left < sr.right
+        && document.elementFromPoint(ar.left + ar.width / 2, ar.top + ar.height / 2)?.closest('[data-sheet]')
+      let intersect = false
+      let lr = null
+      if (l) {
+        lr = l.getBoundingClientRect()
+        const hidden = lr.width === 0 || lr.height === 0 || getComputedStyle(l).display === 'none' || getComputedStyle(l).visibility === 'hidden'
+        if (!hidden) {
+          intersect = !(ar.right <= lr.left || ar.left >= lr.right || ar.bottom <= lr.top || ar.top >= lr.bottom)
+        }
+      }
+      const snap = document.querySelector('[data-sheet-snap]')?.getAttribute('data-sheet-snap')
+      return {
+        ok: !covered && !intersect && ar.top >= 0 && ar.bottom < window.innerHeight,
+        covered: !!covered,
+        intersect,
+        snap,
+        ar: { top: ar.top, bottom: ar.bottom, left: ar.left, right: ar.right },
+        lr,
+        sheetTop: sr?.top,
+      }
+    })
+    if (!fullLegend.ok) {
+      throw new Error(`${name}: attribution covered or overlapping legend at full sheet: ${JSON.stringify(fullLegend)}`)
+    }
+    legend = { ...(legend ?? {}), sheetFull: fullLegend, fullAttrib }
+    await page.screenshot({ path: path.join(shots, `${name}-sheet-full.png`), fullPage: false })
+  }
+
+  // 404s: glyph and other app requests must not 404. Allow aborted DEM/OSM tiles (pan/cancel).
+  const real404s = http404s.filter((r) => {
+    if (/favicon/.test(r.url)) return false
+    if (/elevation-tiles-prod|tile\.openstreetmap/.test(r.url) && r.status === 404) return false
+    return true
+  })
+  if (real404s.some((r) => /demotiles\.maplibre|\/glyphs\//.test(r.url) || r.status >= 400)) {
+    const bad = real404s.filter((r) => /demotiles|glyphs|font/.test(r.url) || (r.status >= 400 && !/elevation-tiles|openstreetmap/.test(r.url)))
+    if (bad.length) {
+      errors.push(`${name}: http 404s ${JSON.stringify(bad)}`)
     }
   }
 
@@ -177,9 +371,12 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
       !/net::ERR_ABORTED/.test(e) &&
       !/Failed to load resource: the server responded with a status of 4/.test(e),
   )
+  // Glyph / demotiles failures must still fail the run
+  const glyphErr = pageErrors.filter((e) => /demotiles\.maplibre|\/glyphs\//.test(e))
   errors.push(...real.map((e) => `${name}: ${e}`))
+  errors.push(...glyphErr.filter((e) => !real.includes(e)).map((e) => `${name}: ${e}`))
   await page.close()
-  return { name, width, height, stepChanged, mapMoved, before, after, attrib, climbShot, consoleErrors: real }
+  return { name, width, height, stepChanged, mapMoved, before, after, attrib, legend, climbShot, step7AtEnd, touchScrub, http404s: real404s, consoleErrors: real }
 }
 
 const browser = await chromium.launch({
@@ -212,6 +409,14 @@ if (!results.every((r) => r.stepChanged)) {
 }
 if (!results.every((r) => r.attrib?.ok)) {
   console.error('FAIL: attribution not visible')
+  process.exit(1)
+}
+if (results.some((r) => r.width >= 1280 && !r.step7AtEnd?.ok)) {
+  console.error('FAIL: step 7 did not activate at rail end')
+  process.exit(1)
+}
+if (results.some((r) => (r.http404s ?? []).some((x) => /demotiles|glyphs/.test(x.url)))) {
+  console.error('FAIL: glyph or demotiles 404')
   process.exit(1)
 }
 console.log('SMOKE OK')

@@ -38,16 +38,17 @@ Under the chart: “Gain 918 m · distance 7.5 km”. Hover, tap and arrow keys 
 1. First paint is a fixed-height box with a two-stroke skeleton (solid pine drive + dashed clay hike). Summary, timeline, elevation profile and CTA do not wait on MapLibre.
 2. After idle, MapLibre mounts the **flat** OSM basemap + route (saturation/contrast pulled back so the lines pop).
 3. Then, on `requestIdleCallback` / map `idle`, the **DEM** source, hillshade and `maplibre-contour` contours are added. No DEM tiles are requested before the map mounts.
-4. **Phone (&lt;768 px):** 2D hillshade + contours, pitch 0, no 3D terrain.
-5. **Desktop:** a 44 px “3D” toggle is available and **off by default**. When on (and on the climb view), gentle exaggeration 1.3 and a modest pitch. `prefers-reduced-motion` forces 2D.
+4. **Phone:** 2D hillshade + contours at pitch 0. A 44 px “3D” toggle is visible and **off by default** (opt-in). 
+5. **Desktop:** the same “3D” toggle turns **on after the first `fitBounds` and after the DEM has loaded on idle** — never on the first-paint path. Pitch is used for the climb view. The user can turn it off. `prefers-reduced-motion` forces 2D, with the toggle disabled.
 
-Attribution is a real, compact control **top-right of the map**, under the view toggles, so the mobile bottom sheet never covers it. It is checked by the smoke test at **390 px and 1280 px**:
+Attribution is a compact control **top-right of the map**, under the view and 3D toggles, so the mobile bottom sheet never covers it. The drive/hike legend sits **bottom-left, just above the sheet** on the phone, and must not overlap attribution. Smoke checks attribution at **390 px and 1280 px**, and that the legend and attribution boxes do not intersect at 390 px:
 
 > © OpenStreetMap contributors · Terrain: Mapzen / AWS Terrain Tiles
 
 ### OSM tiles are preview-only
 
-The OSM raster tiles (`tile.openstreetmap.org`) — and OpenTopoMap, if it were used — are **preview-only**. They are fine for this low-traffic look at the page, but they are not a production tile host. A production deploy needs a tile-host decision from **devops and Drini** (self-hosted, a commercial OSM-based provider, or similar) before going live. Hillshade and contours already come from free AWS Terrain Tiles and can stay.
+The OSM raster tiles (`tile.openstreetmap.org`) — and OpenTopoMap, if it were used — are **preview-only**. They are fine for this low-traffic look at the page, but they are not a production tile host. A production deploy needs a tile-host decision from **devops and Drini** (self-hosted, a commercial OSM-based provider, or similar) before going live. Hillshade and contours already come from free AWS Terrain Tiles and can stay. Contour labels use **self-hosted Source Sans 3 SemiBold glyph PBFs** (`/glyphs/Source Sans 3 SemiBold/{range}.pbf`, generated from the `@fontsource` files with fontnik); no `demotiles.maplibre.org` requests.
+
 
 ## Fonts
 
@@ -56,7 +57,7 @@ Self-hosted via `@fontsource`, woff2, `font-display: swap`:
 - **Fraunces 600** — `latin` + `latin-ext` (ë / ç)
 - **Source Sans 3** — 400, 500, 600, `latin` + `latin-ext`
 
-The prerendered HTML preloads **only** the Fraunces 600 latin woff2 (`<link rel="preload" as="font" type="font/woff2" crossorigin>`). No Google Fonts.
+Faces are declared in `src/fonts.css` with `unicode-range` for latin and latin-ext (the `@fontsource` per-subset CSS in this version omits it), so unused subsets are not downloaded. The prerendered HTML preloads **only** the Fraunces 600 latin woff2 (`<link rel="preload" as="font" type="font/woff2" crossorigin>`). No Google Fonts. MapLibre JS and CSS are loaded only from the lazy MapView chunk — they are not in the entry and are not modulepreloaded.
 
 ## Scripts
 
@@ -89,4 +90,4 @@ The summit name **Maja e Vajushës** and elevation **2,057 m** are confirmed and
 
 ## Design
 
-Build follows [`/workspace/hiking/DESIGN.md`](../DESIGN.md) including the v1.1 terrain section, with two team overrides: the elevation profile is a **plain SVG** (no Recharts), and 3D terrain is **off by default** on desktop (opt-in toggle) and **never** used on the phone. Mobile: map on top, bottom sheet with summary, elevation profile, 7-step timeline and gear, sticky “Call to book · 3000 L” bar. Desktop: 420px timeline rail on the left, map on the right. “The climb · 5–6 h” inset opens the elevation profile (and the climb map view).
+Build follows [`/workspace/hiking/DESIGN.md`](../DESIGN.md) including the v1.1 terrain section. The elevation profile is a **plain SVG** (no chart library), as agreed with the team. 3D is opt-in on the phone (off by default, toggle visible) and auto-on for desktop after first `fitBounds` + terrain-on-idle; reduced motion stays 2D. Mobile: full-viewport map with a draggable bottom sheet (vaul, snap points **40% peek** and **88% full**, capped so a strip of map and the attribution stay visible). The sheet has summary, elevation profile, 7-step timeline and gear, sticky “Call to book · 3000 L” bar. Desktop: 420px timeline rail on the left, map on the right. “The climb · 5–6 h” inset opens the elevation profile (and the climb map view).

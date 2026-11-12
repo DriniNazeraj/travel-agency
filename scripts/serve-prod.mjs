@@ -23,6 +23,7 @@ const types = {
   '.woff2': 'font/woff2',
   '.woff': 'font/woff',
   '.ico': 'image/x-icon',
+  '.pbf': 'application/x-protobuf',
 }
 
 function resolve(urlPath) {

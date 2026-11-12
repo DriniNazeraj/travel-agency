@@ -12,7 +12,7 @@ export function ViewToggle({
 }) {
   return (
     <div
-      className="absolute right-3 top-3 z-20 flex rounded-full bg-surface/95 p-0.5 shadow-soft ring-1 ring-line backdrop-blur-sm lg:right-4 lg:top-4"
+      className="flex rounded-full bg-surface/95 p-0.5 shadow-soft ring-1 ring-line backdrop-blur-sm"
       role="group"
       aria-label="Map view"
     >
@@ -21,7 +21,8 @@ export function ViewToggle({
           <Toggle
             pressed={mode === 'whole'}
             onPressedChange={() => onChange('whole')}
-            data-testid="view-whole" aria-label="Whole day, show the full route"
+            data-testid="view-whole"
+            aria-label="Whole day, show the full route"
             className={cn('h-9 min-h-11 px-3 text-xs lg:text-sm', mode === 'whole' && 'pointer-events-none')}
           >
             Whole day
@@ -34,7 +35,8 @@ export function ViewToggle({
           <Toggle
             pressed={mode === 'climb'}
             onPressedChange={() => onChange('climb')}
-            data-testid="view-climb" aria-label="The climb, Lëpushë to Maja e Vajushës"
+            data-testid="view-climb"
+            aria-label="The climb, Lëpushë to Maja e Vajushës"
             className={cn('h-9 min-h-11 px-3 text-xs lg:text-sm', mode === 'climb' && 'pointer-events-none')}
           >
             The climb

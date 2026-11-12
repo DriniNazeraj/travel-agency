@@ -29,11 +29,13 @@ export default defineConfig({
   build: {
     manifest: true,
     chunkSizeWarningLimit: 900,
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (id.includes('maplibre-gl')) return 'maplibre'
-        },
+    // Do not put maplibre in a manualChunk: that pulled Vite's CJS interop
+    // helper into the maplibre file, so the entry statically imported (and
+    // modulepreloaded) the 1 MB library. MapLibre + its CSS load only from
+    // the lazy MapView chunk.
+    modulePreload: {
+      resolveDependencies(filename, deps) {
+        return deps.filter((d) => !/maplibre/i.test(d))
       },
     },
   },

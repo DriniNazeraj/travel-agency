@@ -9,8 +9,7 @@ export function ClimbInset({ visible, onSelect }: ClimbInsetProps) {
     <button
       type="button"
       onClick={onSelect}
-      aria-label="The climb, 5–6 hours, Lëpushë to Maja e Vajushës, 2,057 metres"
-      className="absolute bottom-10 left-3 z-20 w-[168px] rounded-2xl bg-surface/95 p-2.5 text-left shadow-soft ring-1 ring-line backdrop-blur-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pine focus-visible:ring-offset-2 focus-visible:ring-offset-surface lg:bottom-14 lg:left-4 lg:w-[220px] lg:p-3"
+      className="absolute left-3 z-20 w-[168px] rounded-2xl bg-surface/95 p-2.5 text-left shadow-soft ring-1 ring-line backdrop-blur-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pine focus-visible:ring-offset-2 focus-visible:ring-offset-surface lg:left-4 lg:w-[220px] lg:p-3 max-lg:[bottom:calc(var(--sheet-snap,0.4)*100dvh+5.25rem)] lg:bottom-16"
     >
       <p className="text-[9px] font-semibold uppercase tracking-[0.14em] text-ink-muted lg:text-[11px]">
         The climb · 5–6 h

@@ -24,6 +24,14 @@ export function Timeline({ stops, activeId, onSelect, scrollRootRef, observeLock
         .map((s) => itemRefs.current.get(s.id))
         .filter((el): el is HTMLButtonElement => !!el)
       if (!buttons.length) return
+      // At the bottom of the rail the last step can't reach the 28% sentinel,
+      // so pin step 7 when the scroll root is fully (or almost) scrolled.
+      const atBottom = root.scrollHeight - root.scrollTop - root.clientHeight <= 16
+      if (atBottom) {
+        const last = stops[stops.length - 1]
+        if (last && last.id !== activeId) onSelect(last.id, 'scroll')
+        return
+      }
       const rootRect = root.getBoundingClientRect()
       const sentinel = rootRect.top + root.clientHeight * 0.28
       let best: { id: string; dist: number } | null = null
@@ -135,6 +143,8 @@ export function Timeline({ stops, activeId, onSelect, scrollRootRef, observeLock
           )
         })}
       </div>
+      {/* Lets the last step reach the scroll-follow sentinel on a short rail. */}
+      <div className="pointer-events-none hidden h-32 shrink-0 lg:block" aria-hidden="true" />
     </section>
   )
 }

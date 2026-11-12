@@ -1,7 +1,8 @@
 import { Car, Footprints } from 'lucide-react'
+import type { CSSProperties } from 'react'
 import { Ph } from '@/components/Placeholder'
 
-export function RouteLegend({ className }: { className?: string }) {
+export function RouteLegend({ className, style }: { className?: string; style?: CSSProperties }) {
   return (
     <div
       className={
@@ -9,6 +10,7 @@ export function RouteLegend({ className }: { className?: string }) {
         'absolute z-20 flex items-center gap-3 rounded-full bg-surface/90 px-3 py-1.5 text-xs font-medium text-ink shadow-soft ring-1 ring-line backdrop-blur-sm'
       }
       data-testid="route-legend"
+      style={style}
     >
       <span className="inline-flex items-center gap-1.5">
         <Car className="h-3.5 w-3.5 text-pine-mid" aria-hidden="true" />

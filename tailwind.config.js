@@ -13,6 +13,7 @@ export default {
         'pine-mid': '#2F5A48',
         moss: '#4E6B4A',
         clay: '#A8441E',
+        'clay-deep': '#9A3D1A',
         sand: '#C9B896',
         line: '#D4CBBA',
         focus: '#1F3D32',

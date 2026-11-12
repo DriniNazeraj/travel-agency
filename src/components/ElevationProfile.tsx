@@ -60,6 +60,11 @@ export function ElevationProfile({
     onHover(indexFromClientX(e.clientX))
   }
 
+  function onPointerDown(e: PointerEvent) {
+    e.currentTarget.setPointerCapture(e.pointerId)
+    onPointer(e)
+  }
+
   function onKey(e: KeyboardEvent) {
     if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
       e.preventDefault()
@@ -90,9 +95,18 @@ export function ElevationProfile({
       </h2>
       <div
         ref={svgRef}
-        className="mt-2 h-[112px] w-full lg:h-[140px]"
+        className="mt-2 h-[112px] w-full touch-none lg:h-[140px]"
+        style={{ touchAction: 'none' }}
         onPointerMove={onPointer}
-        onPointerDown={onPointer}
+        onPointerDown={onPointerDown}
+        onPointerUp={(e) => {
+          try {
+            e.currentTarget.releasePointerCapture(e.pointerId)
+          } catch {
+            /* already released */
+          }
+        }}
+        onPointerCancel={() => onHover(null)}
         onPointerLeave={() => onHover(null)}
       >
         <svg

@@ -1,11 +1,4 @@
-@import '@fontsource/fraunces/latin-600.css';
-@import '@fontsource/fraunces/latin-ext-600.css';
-@import '@fontsource/source-sans-3/latin-400.css';
-@import '@fontsource/source-sans-3/latin-ext-400.css';
-@import '@fontsource/source-sans-3/latin-500.css';
-@import '@fontsource/source-sans-3/latin-ext-500.css';
-@import '@fontsource/source-sans-3/latin-600.css';
-@import '@fontsource/source-sans-3/latin-ext-600.css';
+@import './fonts.css';
 
 @tailwind base;
 @tailwind components;
@@ -55,6 +48,18 @@
   pointer-events: auto;
   transform-origin: center;
   transition: transform 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+  position: relative;
+}
+/* Invisible ≥44px hit area; visual size stays 28px. Timeline buttons remain the accessible path. */
+.map-pin::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
 }
 .map-pin.is-active {
   background: #a8441e;
@@ -83,18 +88,53 @@
 }
 
 .sheet-mobile {
-  height: calc(var(--sheet-snap, 0.55) * 100dvh);
-  transition: height 280ms cubic-bezier(0.32, 0.72, 0, 1);
+  /* SSR / static fallback: visible height is the active snap (40% / 88%). */
+  height: calc(var(--sheet-snap, 0.4) * 100dvh);
+  max-height: 88dvh;
+  transition: height 0.5s cubic-bezier(0.32, 0.72, 0, 1);
+}
+/*
+ * Vaul snap offsets assume a full-viewport drawer and then translate it
+ * (offset = (1 - snap) * 100vh). A 40dvh drawer plus that translate would
+ * sit entirely off-screen. Fill the viewport, clip the overflow, and let
+ * .sheet-snap-body hold the visible 40% / 88% column (handle, scroll, CTA).
+ */
+[data-vaul-drawer].sheet-mobile {
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  transition: none;
+}
+.sheet-snap-body {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: calc(var(--sheet-snap, 0.4) * 100dvh);
+  max-height: 88dvh;
+  min-height: 0;
+  transition: height 0.5s cubic-bezier(0.32, 0.72, 0, 1);
 }
 @media (prefers-reduced-motion: reduce) {
-  .sheet-mobile {
+  .sheet-mobile,
+  .sheet-snap-body {
     transition: none;
+  }
+  [data-vaul-drawer],
+  [data-vaul-drawer-wrapper],
+  [data-vaul-handle] {
+    transition: none !important;
+    animation: none !important;
   }
 }
 @media (min-width: 1024px) {
-  .sheet-mobile {
-    height: 100%;
+  .sheet-mobile,
+  [data-vaul-drawer].sheet-mobile,
+  .sheet-snap-body {
+    height: 100% !important;
+    max-height: none;
     transition: none;
+    transform: none !important;
+    overflow: visible;
   }
 }
 
@@ -108,6 +148,32 @@
   pointer-events: none;
 }
 .map-pin-summit {
-  /* number sits on a mountain-tinted disc — glyph is the disc shape via a clip */
+  display: flex;
+  width: 28px;
+  height: 28px;
+  border-radius: 9999px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+  background: #a8441e;
   box-shadow: 0 2px 6px rgba(27, 25, 20, 0.25);
+}
+.map-pin-summit .map-pin-mountain {
+  display: block;
+  width: 14px;
+  height: 14px;
+  color: #f8f4ec;
+  margin-bottom: -2px;
+  flex-shrink: 0;
+}
+.map-pin-summit .map-pin-num {
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  color: #f8f4ec;
+}
+.map-pin-summit.is-active {
+  background: #a8441e;
 }
