@@ -134,23 +134,26 @@ function TripScreen({ trip: t }: { trip: Trip }) {
         const el = root?.querySelector<HTMLElement>(`[data-step-id="${id}"]`)
         // Keyboard (and reduced-motion) jump instantly so a 900ms tour is
         // not fighting a smooth-scroll that outlives the lock. Click can
-        // stay smooth; the lock lasts until scrollend (min 1200ms).
+        // stay smooth.
         const instant = source === 'keyboard' || prefersReducedMotion()
         el?.scrollIntoView({ behavior: instant ? 'auto' : 'smooth', block: 'center' })
-        const lockedAt = Date.now()
         const unlock = () => {
+          if (!observeLockRef.current && !lockTimer.current) return
           observeLockRef.current = false
           root?.removeEventListener('scrollend', onScrollEnd)
+          if (lockTimer.current) {
+            clearTimeout(lockTimer.current)
+            lockTimer.current = undefined
+          }
         }
-        const onScrollEnd = () => {
-          // Never release before 1200ms — a 900ms Enter tour must hold
-          // the latest step even when instant scroll fires scrollend immediately.
-          const leftover = Math.max(120, 1200 - (Date.now() - lockedAt))
-          if (lockTimer.current) clearTimeout(lockTimer.current)
-          lockTimer.current = setTimeout(unlock, leftover)
-        }
+        const onScrollEnd = () => unlock()
         root?.addEventListener('scrollend', onScrollEnd, { once: true })
-        lockTimer.current = setTimeout(unlock, 2000)
+        // Hold only until this programmatic scroll settles: scrollend OR
+        // ~1200ms, whichever comes first. Then scroll-follow can re-arm
+        // on the next real user gesture. (A leftover wait after scrollend
+        // left the lock held while the user already scrolled, so the
+        // active stop stayed on the keyboard target.)
+        lockTimer.current = setTimeout(unlock, 1200)
       }
     },
     [],

@@ -18,16 +18,19 @@ export function Timeline({ stops, activeId, onSelect, scrollRootRef, observeLock
     const root = scrollRootRef.current
     if (!root) return
 
-    // Arm only on a real user gesture. Programmatic scrollIntoView,
-    // focus-scroll, and IntersectionObserver callbacks after a keyboard
-    // select must not steal the step the user just asked for.
-    let userArmedUntil = 0
+    // Arm only on a real user gesture, and stay armed until this effect
+    // re-runs (an explicit select changes activeId). A short 400ms window
+    // expired while observeLock was still held, so a later wheel/touch
+    // never re-armed and the active stop stayed on the keyboard target.
+    // Programmatic scrollIntoView and IntersectionObserver callbacks after
+    // a keyboard select must not steal the step the user just asked for.
+    let userArmed = false
     const armUser = () => {
-      userArmedUntil = Date.now() + 400
+      userArmed = true
     }
     const update = () => {
       if (observeLockRef.current) return
-      if (Date.now() > userArmedUntil) return
+      if (!userArmed) return
       const buttons = stops
         .map((s) => itemRefs.current.get(s.id))
         .filter((el): el is HTMLButtonElement => !!el)
@@ -63,16 +66,32 @@ export function Timeline({ stops, activeId, onSelect, scrollRootRef, observeLock
       const el = itemRefs.current.get(s.id)
       if (el) io.observe(el)
     }
+    const onKeyArm = (e: Event) => {
+      const key = 'key' in e ? String((e as unknown as { key: string }).key) : ''
+      if (
+        key === 'PageDown' ||
+        key === 'PageUp' ||
+        key === 'ArrowDown' ||
+        key === 'ArrowUp' ||
+        key === 'Home' ||
+        key === 'End' ||
+        key === ' '
+      ) {
+        armUser()
+      }
+    }
     root.addEventListener('scroll', update, { passive: true })
     root.addEventListener('wheel', armUser, { passive: true })
     root.addEventListener('touchmove', armUser, { passive: true })
     root.addEventListener('pointerdown', armUser)
+    root.addEventListener('keydown', onKeyArm)
     return () => {
       io.disconnect()
       root.removeEventListener('scroll', update)
       root.removeEventListener('wheel', armUser)
       root.removeEventListener('touchmove', armUser)
       root.removeEventListener('pointerdown', armUser)
+      root.removeEventListener('keydown', onKeyArm)
     }
   }, [stops, activeId, onSelect, scrollRootRef, observeLockRef])
 

@@ -139,13 +139,15 @@ function scheduleEase(
   easeOpts: maplibregl.EaseToOptions,
   target: CamTarget,
   onSettled?: () => void,
+  isCurrent?: () => boolean,
 ) {
   // Cancel any previous ensure/timeout so a stale jumpTo cannot overwrite
   // the newest target after the next keyboard request.
   genBox.cleanup?.()
   genBox.cleanup = undefined
 
-  const stillMine = () => gen === genBox.current && !!map.getContainer()
+  const stillMine = () =>
+    gen === genBox.current && !!map.getContainer() && (isCurrent?.() ?? true)
 
   const apply = () => {
     if (!stillMine()) {
@@ -218,6 +220,7 @@ function easeToBounds(
   opts: CamMoveOpts,
   genBox?: CamGen,
   gen?: number,
+  isCurrent?: () => boolean,
 ): boolean {
   const box = genBox ?? { current: 0 }
   const my = gen ?? ++box.current
@@ -261,6 +264,8 @@ function easeToBounds(
       essential: true,
     },
     { lng: ll.lng, lat: ll.lat, zoom, pitch, bearing: cam.bearing ?? bearing },
+    undefined,
+    isCurrent,
   )
   return true
 }
@@ -272,6 +277,7 @@ function easeToPoint(
   opts: { zoom: number; pitch: number; padding: maplibregl.PaddingOptions; duration: number },
   genBox?: CamGen,
   gen?: number,
+  isCurrent?: () => boolean,
 ): boolean {
   const box = genBox ?? { current: 0 }
   const my = gen ?? ++box.current
@@ -321,6 +327,8 @@ function easeToPoint(
     opts.duration,
     easeOpts,
     { lng: dest.lng, lat: dest.lat, zoom: opts.zoom, pitch: opts.pitch, bearing: 0 },
+    undefined,
+    isCurrent,
   )
   return true
 }
@@ -409,6 +417,65 @@ function hikeBounds(trip: Trip): maplibregl.LngLatBounds {
   return boundsFor(pts)
 }
 
+/** Fit the camera to the *current* mode's bounds (hike, whole day, or the
+ *  active stop). A resize or snap re-fit must call this so a leftover step
+ *  target cannot win after the user has opened The climb or Whole day. */
+function cameraForMode(
+  map: maplibregl.Map,
+  mode: MapViewMode,
+  trip: Trip,
+  activeId: string,
+  opts: { duration: number; pitch: number },
+  box?: CamGen,
+  gen?: number,
+  isCurrent?: () => boolean,
+): boolean {
+  if (mode === 'climb') {
+    return easeToBounds(
+      map,
+      hikeBounds(trip),
+      {
+        padding: padding(map, 'climb'),
+        pitch: opts.pitch,
+        duration: opts.duration,
+        maxZoom: 14,
+        bearing: 0,
+      },
+      box,
+      gen,
+      isCurrent,
+    )
+  }
+  if (mode === 'whole') {
+    return easeToBounds(
+      map,
+      boundsFor(allRouteCoords(trip.route)),
+      {
+        padding: padding(map, 'whole'),
+        duration: opts.duration,
+        pitch: 0,
+      },
+      box,
+      gen,
+      isCurrent,
+    )
+  }
+  const stop = trip.stops.find((s) => s.id === activeId)
+  if (!stop) return false
+  return easeToPoint(
+    map,
+    [stop.lng, stop.lat],
+    {
+      zoom: 13,
+      padding: padding(map, 'stop'),
+      pitch: opts.pitch,
+      duration: opts.duration,
+    },
+    box,
+    gen,
+    isCurrent,
+  )
+}
 
 function refreshMarkers(markers: maplibregl.Marker[]) {
   for (const m of markers) {
@@ -686,11 +753,13 @@ export default function MapView({
         setLegEmphasis(map, activeLegForStop(stop?.order ?? 1))
 
         // First paint is always a flat fit of the whole day — 3D stays out of this path.
-        easeToBounds(map, boundsFor(allRouteCoords(trip.route)), {
-          padding: padding(map, 'whole'),
-          duration: 0,
-          pitch: 0,
-        })
+        // Shared token so a later climb/stop request can cancel this.
+        easeToBounds(
+          map,
+          boundsFor(allRouteCoords(trip.route)),
+          { padding: padding(map, 'whole'), duration: 0, pitch: 0 },
+          camGenRef.current,
+        )
 
         const groups = groupPlaces(trip.stops)
         for (const g of groups) {
@@ -726,11 +795,12 @@ export default function MapView({
         // camera (same stop / resetPadding / cameraForBounds path as The climb)
         // so phone padding sees the measured sheet.
         map.resize()
-        easeToBounds(map, boundsFor(allRouteCoords(trip.route)), {
-          padding: padding(map, 'whole'),
-          duration: 0,
-          pitch: 0,
-        })
+        easeToBounds(
+          map,
+          boundsFor(allRouteCoords(trip.route)),
+          { padding: padding(map, 'whole'), duration: 0, pitch: 0 },
+          camGenRef.current,
+        )
         writeCamera(cameraHost, map)
 
         // Reveal (cross-fade from the skeleton) on the first idle — the route
@@ -741,14 +811,25 @@ export default function MapView({
           onReadyRef.current?.()
           el.classList.add('map-live')
           map?.resize()
-          // Re-fit after the reveal resize so phone whole-day padding sees
-          // the final layout (sheet height and canvas size).
-          if (map && modeRef.current === 'whole') {
-            easeToBounds(map, boundsFor(allRouteCoords(trip.route)), {
-              padding: padding(map, 'whole'),
-              duration: 0,
-              pitch: 0,
-            })
+          // Re-fit the *current* mode after the reveal resize (usually whole
+          // day; if the user already opened The climb, do not re-apply a
+          // stale whole-day or step camera).
+          if (map) {
+            const m = modeRef.current
+            const box = camGenRef.current
+            box.cleanup?.()
+            box.cleanup = undefined
+            box.current += 1
+            cameraForMode(
+              map,
+              m,
+              trip,
+              activeRef.current,
+              { duration: 0, pitch: 0 },
+              box,
+              box.current,
+              () => modeRef.current === m,
+            )
             writeCamera(cameraHost, map)
           }
         }
@@ -769,7 +850,30 @@ export default function MapView({
       onFailRef.current?.()
     }
 
-    const onResize = () => map?.resize()
+    const onResize = () => {
+      if (!map) return
+      map.resize()
+      if (!loadedRef.current) return
+      const m = modeRef.current
+      // Re-fit overview/climb to the current mode's bounds — never the last
+      // step, which is what left The climb stuck on Tirana after a sheet
+      // snap or canvas resize. Stop mode keeps its current centre.
+      if (m !== 'climb' && m !== 'whole') return
+      const box = camGenRef.current
+      box.cleanup?.()
+      box.cleanup = undefined
+      box.current += 1
+      cameraForMode(
+        map,
+        m,
+        trip,
+        activeRef.current,
+        { duration: 0, pitch: map.getPitch() },
+        box,
+        box.current,
+        () => modeRef.current === m,
+      )
+    }
     window.addEventListener('resize', onResize)
 
     return () => {
@@ -831,7 +935,9 @@ export default function MapView({
     }
     const gen = box.current
     let cancelled = false
-    const stillMine = () => !cancelled && gen === box.current
+    const stillMine = () => !cancelled && gen === box.current && modeRef.current === mode
+    // Stale step eases / jumpTos must not apply after a mode switch.
+    const isCurrent = () => stillMine()
 
     const frameClimb = async (pitch: number, duration: number) => {
       if (pitch > 0) {
@@ -845,6 +951,8 @@ export default function MapView({
         }
       }
       if (!stillMine()) return
+      // Entering climb always wins over a pending or running step move:
+      // the token was already bumped, and easeToBounds calls map.stop().
       const ok = easeToBounds(
         map,
         hikeBounds(trip),
@@ -857,6 +965,7 @@ export default function MapView({
         },
         box,
         gen,
+        isCurrent,
       )
       if (!ok) return
       await waitIdle(map, 2000)
@@ -881,6 +990,8 @@ export default function MapView({
             reduced ? 0 : 400,
             { pitch: 0, essential: true },
             { lng: c.lng, lat: c.lat, zoom: map.getZoom(), pitch: 0, bearing: map.getBearing() },
+            undefined,
+            isCurrent,
           )
         }
       } else {
@@ -897,6 +1008,8 @@ export default function MapView({
             reduced ? 0 : 500,
             { pitch, essential: true },
             { lng: c.lng, lat: c.lat, zoom: map.getZoom(), pitch, bearing: 0 },
+            undefined,
+            isCurrent,
           )
         }
       }
@@ -908,6 +1021,7 @@ export default function MapView({
     }
 
     if (mode === 'whole') {
+      map.stop()
       easeToBounds(
         map,
         boundsFor(allRouteCoords(trip.route)),
@@ -918,6 +1032,7 @@ export default function MapView({
         },
         box,
         gen,
+        isCurrent,
       )
       return () => {
         cancelled = true
@@ -927,6 +1042,9 @@ export default function MapView({
       }
     }
     if (mode === 'climb') {
+      // Newest request wins: token already bumped; stop any in-flight step
+      // ease so The climb is not overwritten by step 7's moveend / jumpTo.
+      map.stop()
       addTerrainLayers(map)
       void frameClimb(wantPitch('climb'), reduced ? 0 : 800)
       return () => {
@@ -952,6 +1070,7 @@ export default function MapView({
       },
       box,
       gen,
+      isCurrent,
     )
     return () => {
       cancelled = true

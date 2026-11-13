@@ -13,7 +13,38 @@ Drawer.displayName = 'Drawer'
 const DrawerTrigger = VaulDrawer.Trigger
 const DrawerPortal = VaulDrawer.Portal
 const DrawerClose = VaulDrawer.Close
-const DrawerHandle = VaulDrawer.Handle
+// Vaul hard-codes aria-hidden="true" on the Handle, which fights our
+// role="button" + aria-label. Strip it (and keep it off if vaul puts it back).
+const DrawerHandle = React.forwardRef<
+  React.ElementRef<typeof VaulDrawer.Handle>,
+  React.ComponentPropsWithoutRef<typeof VaulDrawer.Handle>
+>((props, ref) => {
+  const localRef = React.useRef<HTMLElement | null>(null)
+  const setRef = React.useCallback(
+    (node: HTMLElement | null) => {
+      localRef.current = node
+      if (typeof ref === 'function') ref(node as never)
+      else if (ref) (ref as React.MutableRefObject<HTMLElement | null>).current = node
+    },
+    [ref],
+  )
+  React.useLayoutEffect(() => {
+    const el = localRef.current
+    if (!el) return
+    const clear = () => {
+      if (el.hasAttribute('aria-hidden')) {
+        el.removeAttribute('aria-hidden')
+        el.removeAttribute('data-aria-hidden')
+      }
+    }
+    clear()
+    const mo = new MutationObserver(clear)
+    mo.observe(el, { attributes: true, attributeFilter: ['aria-hidden', 'data-aria-hidden'] })
+    return () => mo.disconnect()
+  }, [])
+  return <VaulDrawer.Handle ref={setRef} {...props} />
+})
+DrawerHandle.displayName = 'DrawerHandle'
 
 const DrawerOverlay = React.forwardRef<
   React.ElementRef<typeof VaulDrawer.Overlay>,
