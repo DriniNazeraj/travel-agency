@@ -1,0 +1,254 @@
+@import './fonts.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: light;
+    background: #ede6d9;
+  }
+  body {
+    font-family: "Source Sans 3", "Source Sans Pro", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  :focus-visible {
+    outline: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Numbered MapLibre HTML markers */
+.map-pin {
+  width: 28px;
+  height: 28px;
+  border-radius: 9999px;
+  background: #1f3d32;
+  color: #f8f4ec;
+  font-family: "Source Sans 3", "Source Sans Pro", system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 12px;
+  display: grid;
+  place-items: center;
+  border: 2px solid #f8f4ec;
+  box-shadow: 0 2px 6px rgba(27, 25, 20, 0.25);
+  cursor: pointer;
+  pointer-events: auto;
+  transform-origin: center;
+  transition: transform 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+  position: relative;
+}
+/* Invisible ≥44px hit area; visual size stays 28px. Timeline buttons remain the accessible path. */
+.map-pin::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
+}
+.map-pin.is-active {
+  background: #a8441e;
+  box-shadow: 0 0 0 4px #f8f4ec, 0 0 0 6px #a8441e, 0 2px 6px rgba(27, 25, 20, 0.25);
+}
+.map-pin:hover {
+  transform: scale(1.06);
+}
+@media (prefers-reduced-motion: reduce) {
+  .map-pin {
+    transition: none;
+  }
+  .map-pin:hover {
+    transform: none;
+  }
+}
+
+.maplibregl-ctrl-attrib {
+  font-size: 10px !important;
+  font-family: "Source Sans 3", system-ui, sans-serif !important;
+  background: rgba(248, 244, 236, 0.92) !important;
+  color: #5e574c !important;
+}
+.maplibregl-ctrl-attrib a {
+  color: #1f3d32 !important;
+}
+
+.sheet-mobile {
+  /* SSR / static fallback: visible height is the active snap (40% / 88%). */
+  height: calc(var(--sheet-snap, 0.4) * 100dvh);
+  max-height: 88dvh;
+  transition: height 0.5s cubic-bezier(0.32, 0.72, 0, 1);
+}
+/*
+ * Vaul snap offsets assume a full-viewport drawer and then translate it
+ * (offset = (1 - snap) * 100vh). A 40dvh drawer plus that translate would
+ * sit entirely off-screen. Fill the viewport, clip the overflow, and let
+ * .sheet-snap-body hold the visible 40% / 88% column (handle, scroll, CTA).
+ */
+[data-vaul-drawer].sheet-mobile {
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  transition: none;
+}
+.sheet-snap-body {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: calc(var(--sheet-snap, 0.4) * 100dvh);
+  max-height: 88dvh;
+  min-height: 0;
+  transition: height 0.5s cubic-bezier(0.32, 0.72, 0, 1);
+}
+/*
+ * Vaul injects [data-vaul-handle] { background:#e2e2e4; height:5px; width:32px }
+ * at runtime, which painted a ~40×50 grey blob over our Tailwind classes.
+ * The visible bar is 36×4 #D4CBBA rounded-full; the control itself is a
+ * 44px-tall, ≥44px-wide invisible hit area. !important beats the injected sheet.
+ */
+.sheet-handle,
+[data-testid="sheet-handle"][data-vaul-handle],
+[data-testid="sheet-handle"] {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  position: relative !important;
+  box-sizing: border-box;
+  width: 100% !important;
+  min-width: 44px !important;
+  height: 44px !important;
+  min-height: 44px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  opacity: 1 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  flex-shrink: 0;
+  touch-action: pan-y;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.sheet-handle:hover,
+.sheet-handle:active,
+.sheet-handle:focus,
+[data-testid="sheet-handle"][data-vaul-handle]:hover,
+[data-testid="sheet-handle"][data-vaul-handle]:active,
+[data-testid="sheet-handle"][data-vaul-handle]:focus {
+  opacity: 1 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+}
+.sheet-handle [data-vaul-handle-hitarea],
+[data-testid="sheet-handle"] [data-vaul-handle-hitarea] {
+  position: absolute !important;
+  left: 50% !important;
+  top: 50% !important;
+  transform: translate(-50%, -50%) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 100% !important;
+  min-width: 44px !important;
+  height: 44px !important;
+  min-height: 44px !important;
+  background: transparent !important;
+  background-color: transparent !important;
+}
+.sheet-handle-bar {
+  display: block !important;
+  width: 36px !important;
+  height: 4px !important;
+  min-width: 36px;
+  min-height: 4px;
+  max-width: 36px;
+  max-height: 4px;
+  border-radius: 9999px !important;
+  background: #d4cbba !important;
+  background-color: #d4cbba !important;
+  opacity: 1 !important;
+  flex-shrink: 0;
+  pointer-events: none;
+  margin: 0 !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet-mobile,
+  .sheet-snap-body {
+    transition: none;
+  }
+  [data-vaul-drawer],
+  [data-vaul-drawer-wrapper],
+  [data-vaul-handle] {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+@media (min-width: 1024px) {
+  .sheet-mobile,
+  [data-vaul-drawer].sheet-mobile,
+  .sheet-snap-body {
+    height: 100% !important;
+    max-height: none;
+    transition: none;
+    transform: none !important;
+    overflow: visible;
+  }
+}
+
+.profile-hover-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: #1f3d32;
+  border: 3px solid #f8f4ec;
+  box-shadow: 0 1px 4px rgba(27, 25, 20, 0.35);
+  pointer-events: none;
+}
+.map-pin-summit {
+  display: flex;
+  width: 28px;
+  height: 28px;
+  border-radius: 9999px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+  background: #a8441e;
+  box-shadow: 0 2px 6px rgba(27, 25, 20, 0.25);
+}
+.map-pin-summit .map-pin-mountain {
+  display: block;
+  width: 14px;
+  height: 14px;
+  color: #f8f4ec;
+  margin-bottom: -2px;
+  flex-shrink: 0;
+}
+.map-pin-summit .map-pin-num {
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  color: #f8f4ec;
+}
+.map-pin-summit.is-active {
+  background: #a8441e;
+}
