@@ -2,8 +2,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const dist = path.resolve('dist')
-const ssrPath = path.resolve('dist-ssr/entry-server.js')
+const dist = path.resolve(process.env.DIST ?? 'dist')
+const ssrDir = path.resolve(process.env.DIST_SSR ?? 'dist-ssr')
+const ssrPath = path.join(ssrDir, 'entry-server.js')
 const mod = (await import(pathToFileURL(ssrPath).href)) as {
   render: (url: string) => Promise<{ html: string; head: string }>
 }
@@ -74,5 +75,5 @@ if (fs.existsSync(robots)) {
 
 // Manifest is only needed at build time
 fs.rmSync(path.join(dist, '.vite'), { recursive: true, force: true })
-fs.rmSync('dist-ssr', { recursive: true, force: true })
+fs.rmSync(ssrDir, { recursive: true, force: true })
 console.log('prerender done')

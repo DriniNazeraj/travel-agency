@@ -196,9 +196,9 @@ function TripScreen({ trip: t }: { trip: Trip }) {
       role="button"
       tabIndex={0}
       onKeyDown={onHandleKey}
-      className="mx-auto mb-1 mt-2 flex h-11 min-h-11 w-full shrink-0 items-center justify-center bg-transparent lg:hidden"
+      className="sheet-handle lg:hidden"
     >
-      <span className="h-1 w-10 rounded-full bg-sand" aria-hidden="true" />
+      <span className="sheet-handle-bar" data-testid="sheet-handle-bar" aria-hidden="true" />
     </DrawerHandle>
   )
 
@@ -273,9 +273,9 @@ function TripScreen({ trip: t }: { trip: Trip }) {
                   data-testid="sheet-handle"
                   aria-label={snap >= (SHEET_PEEK + SHEET_FULL) / 2 ? 'Collapse itinerary sheet' : 'Expand itinerary sheet'}
                   onClick={toggleSnap}
-                  className="mx-auto mb-1 mt-2 flex h-11 min-h-11 w-full shrink-0 items-center justify-center lg:hidden"
+                  className="sheet-handle lg:hidden"
                 >
-                  <span className="h-1 w-10 rounded-full bg-sand" aria-hidden="true" />
+                  <span className="sheet-handle-bar" data-testid="sheet-handle-bar" aria-hidden="true" />
                 </button>
               }
             />

@@ -114,6 +114,81 @@
   min-height: 0;
   transition: height 0.5s cubic-bezier(0.32, 0.72, 0, 1);
 }
+/*
+ * Vaul injects [data-vaul-handle] { background:#e2e2e4; height:5px; width:32px }
+ * at runtime, which painted a ~40×50 grey blob over our Tailwind classes.
+ * The visible bar is 36×4 #D4CBBA rounded-full; the control itself is a
+ * 44px-tall, ≥44px-wide invisible hit area. !important beats the injected sheet.
+ */
+.sheet-handle,
+[data-testid="sheet-handle"][data-vaul-handle],
+[data-testid="sheet-handle"] {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  position: relative !important;
+  box-sizing: border-box;
+  width: 100% !important;
+  min-width: 44px !important;
+  height: 44px !important;
+  min-height: 44px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  opacity: 1 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  flex-shrink: 0;
+  touch-action: pan-y;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.sheet-handle:hover,
+.sheet-handle:active,
+.sheet-handle:focus,
+[data-testid="sheet-handle"][data-vaul-handle]:hover,
+[data-testid="sheet-handle"][data-vaul-handle]:active,
+[data-testid="sheet-handle"][data-vaul-handle]:focus {
+  opacity: 1 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+}
+.sheet-handle [data-vaul-handle-hitarea],
+[data-testid="sheet-handle"] [data-vaul-handle-hitarea] {
+  position: absolute !important;
+  left: 50% !important;
+  top: 50% !important;
+  transform: translate(-50%, -50%) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 100% !important;
+  min-width: 44px !important;
+  height: 44px !important;
+  min-height: 44px !important;
+  background: transparent !important;
+  background-color: transparent !important;
+}
+.sheet-handle-bar {
+  display: block !important;
+  width: 36px !important;
+  height: 4px !important;
+  min-width: 36px;
+  min-height: 4px;
+  max-width: 36px;
+  max-height: 4px;
+  border-radius: 9999px !important;
+  background: #d4cbba !important;
+  background-color: #d4cbba !important;
+  opacity: 1 !important;
+  flex-shrink: 0;
+  pointer-events: none;
+  margin: 0 !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sheet-mobile,
   .sheet-snap-body {

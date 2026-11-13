@@ -351,7 +351,12 @@ function padding(map: maplibregl.Map | undefined, mode: MapViewMode): maplibregl
   const bottom = overlap + 24
   // Clear the top-right stack (view toggle + 3D + attribution) and the wordmark.
   const top = mode === 'climb' ? 112 : 80
-  return clampPad({ top, right: 36, bottom, left: 36 }, width, height)
+  // Phone climb (<768): extra ~32px right so the summit pin clears the
+  // canvas edge and the basemap "Maja e Vajushës 2057 m" label. Desktop
+  // climb framing (isLg, above) is unchanged.
+  const vw = typeof window !== 'undefined' ? window.innerWidth : width
+  const right = mode === 'climb' && vw < 768 ? 36 + 32 : 36
+  return clampPad({ top, right, bottom, left: 36 }, width, height)
 }
 
 function boundsFor(coords: [number, number][]) {

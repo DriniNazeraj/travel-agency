@@ -316,6 +316,63 @@ async function arrowToStep(page, key, step, shots, name) {
 
 
 
+
+/** Phone sheet handle: 36×4 visual bar, ≥44px hit area, first row below it. */
+async function assertSheetHandle(page, name, shots) {
+  const info = await page.evaluate(() => {
+    const handle = document.querySelector('[data-testid="sheet-handle"]')
+    const bar = document.querySelector('[data-testid="sheet-handle-bar"]')
+    const scroll = document.querySelector('[data-timeline-scroll]')
+    const first = document.querySelector('button[data-step="1"]')
+    if (!handle || !bar) return { ok: false, reason: 'missing-handle-or-bar' }
+    const cs = getComputedStyle(handle)
+    const bcs = getComputedStyle(bar)
+    const hr = handle.getBoundingClientRect()
+    const br = bar.getBoundingClientRect()
+    const hitarea = handle.querySelector('[data-vaul-handle-hitarea]')
+    const hit = (hitarea ?? handle).getBoundingClientRect()
+    const sr = scroll?.getBoundingClientRect()
+    const fr = first?.getBoundingClientRect()
+    const insideScroll = !!(scroll && scroll.contains(handle))
+    const barW = br.width
+    const barH = br.height
+    const barOk = Math.abs(barW - 36) <= 1.5 && Math.abs(barH - 4) <= 1.5
+    const hitOk = hit.width >= 44 && hit.height >= 44 && hr.height >= 44 && hr.width >= 44
+    const bg = (cs.backgroundColor || '').replace(/\s/g, '')
+    const transparentBg =
+      bg === 'transparent' ||
+      bg === 'rgba(0,0,0,0)' ||
+      bg === 'rgba(0,0,0,0)' ||
+      /^rgba\(\d+,\d+,\d+,0\)$/.test(bg)
+    const barBg = (bcs.backgroundColor || '').replace(/\s/g, '')
+    // #D4CBBA = rgb(212, 203, 186)
+    const barColorOk = /rgb\(212,\s*203,\s*186\)/.test(bcs.backgroundColor || '') || barBg === '#d4cbba'
+    const scrollBelow = !sr || sr.top >= hr.bottom - 1
+    const firstBelow = !fr || fr.top >= hr.bottom - 1
+    const ok = barOk && hitOk && transparentBg && barColorOk && !insideScroll && scrollBelow && firstBelow
+    return {
+      ok,
+      barOk,
+      hitOk,
+      transparentBg,
+      barColorOk,
+      insideScroll,
+      scrollBelow,
+      firstBelow,
+      bar: { w: +barW.toFixed(2), h: +barH.toFixed(2), bg: bcs.backgroundColor, radius: bcs.borderRadius },
+      handle: { w: +hr.width.toFixed(2), h: +hr.height.toFixed(2), bg: cs.backgroundColor, top: +hr.top.toFixed(2), bottom: +hr.bottom.toFixed(2) },
+      hit: { w: +hit.width.toFixed(2), h: +hit.height.toFixed(2) },
+      scroll: sr ? { top: +sr.top.toFixed(2) } : null,
+      first: fr ? { top: +fr.top.toFixed(2) } : null,
+    }
+  })
+  await page.screenshot({ path: path.join(shots, 'phone-sheet-handle-v131.png'), fullPage: false })
+  if (!info.ok) {
+    throw new Error(`${name}: sheet handle failed: ${JSON.stringify(info)}`)
+  }
+  return info
+}
+
 async function runAt(browser, { name, width, height, alsoClimb = true }) {
   const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 2 })
   const pageErrors = []
@@ -474,8 +531,10 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
   const attrib = await assertAttributionVisible(page, `${name}-drive`)
   // Designer: legend and attribution must not overlap at 390px (phone).
   let legend = null
+  let sheetHandle = null
   if (width === 390) {
     legend = await assertLegendClearOfAttribution(page, `${name}-drive`)
+    sheetHandle = await assertSheetHandle(page, name, shots)
   }
 
   const before = await page.evaluate(() => {
@@ -550,6 +609,7 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
       climbShot = `${name}-climb.png`
       if (width === 390) {
         await page.screenshot({ path: path.join(shots, 'phone-climb-z11.png'), fullPage: false })
+        await page.screenshot({ path: path.join(shots, 'phone-climb-v131.png'), fullPage: false })
       }
       // Let in-flight DEM tiles finish, then read every transfer size.
       await page.waitForTimeout(800)
@@ -857,6 +917,7 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
     mapViewBeforeLoad,
     mapViewReqs,
     paneAria,
+    sheetHandle,
     climbDem,
     climbDemTotal,
     visitDem,
@@ -922,6 +983,11 @@ if (results.some((r) => (r.mapViewBeforeLoad ?? []).length > 0)) {
 }
 if (results.some((r) => r.width === 390 && !r.paneAria?.ok)) {
   console.error('FAIL: map pane is aria-hidden at 390')
+  process.exit(1)
+}
+if (results.some((r) => r.width === 390 && !r.sheetHandle?.ok)) {
+  const bad = results.filter((r) => r.width === 390)
+  console.error('FAIL: sheet handle at 390', JSON.stringify(bad.map((r) => r.sheetHandle), null, 2))
   process.exit(1)
 }
 if (results.some((r) => r.width >= 1280 && !r.terrain3d?.ok)) {
