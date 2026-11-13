@@ -325,6 +325,27 @@ function easeToPoint(
   return true
 }
 
+/** Visible height of the phone sheet where it overlaps the map (peek 40% or the current snap). */
+function visibleSheetHeight(mapRect: DOMRect | undefined): number {
+  const fallback = Math.round(0.4 * (mapRect?.height ?? (typeof window !== 'undefined' ? window.innerHeight : 844)))
+  if (typeof document === 'undefined') return fallback
+  // Prefer .sheet-snap-body (the 40%/88% column) over the 100dvh vaul drawer.
+  const el =
+    (document.querySelector('.sheet-snap-body') as HTMLElement | null) ??
+    (document.querySelector('[data-sheet]') as HTMLElement | null)
+  if (el && mapRect) {
+    const sr = el.getBoundingClientRect()
+    const overlap = Math.max(
+      0,
+      Math.round(Math.min(sr.bottom, mapRect.bottom) - Math.max(sr.top, mapRect.top)),
+    )
+    if (overlap > 0) return overlap
+  }
+  const snap = Number(document.querySelector('[data-sheet-snap]')?.getAttribute('data-sheet-snap'))
+  const vh = typeof window !== 'undefined' ? window.innerHeight : fallback / 0.4
+  return Math.round((Number.isFinite(snap) && snap > 0 && snap <= 1 ? snap : 0.4) * vh)
+}
+
 /** Camera padding. Phone climb uses the measured sheet overlap; desktop climb is ≥64 plus room for controls. */
 function padding(map: maplibregl.Map | undefined, mode: MapViewMode): maplibregl.PaddingOptions {
   const container = map?.getContainer()
@@ -342,11 +363,26 @@ function padding(map: maplibregl.Map | undefined, mode: MapViewMode): maplibregl
     return clampPad({ top: 64, right: 64, bottom: 64, left: 64 }, width, height)
   }
 
+  const vw = typeof window !== 'undefined' ? window.innerWidth : width
   const sheet = typeof document !== 'undefined' ? document.querySelector('[data-sheet]') : null
   let overlap = 0
   if (rect && sheet) {
     const sr = sheet.getBoundingClientRect()
     overlap = Math.max(0, Math.round(rect.bottom - sr.top))
+  }
+  // Phone whole-day (<768): ~120px top clears the wordmark, view/3D toggles
+  // and attribution; bottom is the sheet's actual current height (peek 40%
+  // or the live snap) + 24px. Same resetPadding + cameraForBounds path as
+  // The climb (via easeToBounds). Desktop (isLg) is unchanged above.
+  if (mode === 'whole' && vw < 768) {
+    // 120 clears the control + attribution stack (~100px). The summit pin is
+    // bottom-anchored with a -6 y offset, so its graphic sits ~34px above the
+    // padded coordinate; add that so the pin itself is below 120px.
+    const top = 120 + 36
+    // +24 as specified, plus half the 28px pin so Tirana (center-anchored)
+    // sits fully above the sheet, not just its coordinate.
+    const bottom = visibleSheetHeight(rect) + 24 + 16
+    return clampPad({ top, right: 36, bottom, left: 36 }, width, height)
   }
   const bottom = overlap + 24
   // Clear the top-right stack (view toggle + 3D + attribution) and the wordmark.
@@ -354,7 +390,6 @@ function padding(map: maplibregl.Map | undefined, mode: MapViewMode): maplibregl
   // Phone climb (<768): extra ~32px right so the summit pin clears the
   // canvas edge and the basemap "Maja e Vajushës 2057 m" label. Desktop
   // climb framing (isLg, above) is unchanged.
-  const vw = typeof window !== 'undefined' ? window.innerWidth : width
   const right = mode === 'climb' && vw < 768 ? 36 + 32 : 36
   return clampPad({ top, right, bottom, left: 36 }, width, height)
 }
@@ -685,11 +720,18 @@ export default function MapView({
           markersRef.current.push(marker)
         }
 
-        writeCamera(cameraHost, map)
         // MapLibre's stylesheet sets position:relative and can win over Tailwind
         // `absolute` once the lazy CSS chunk loads after index.css; the container
-        // is !absolute so it fills the pane. Resize after that layout.
+        // is !absolute so it fills the pane. Resize, then re-fit the whole-day
+        // camera (same stop / resetPadding / cameraForBounds path as The climb)
+        // so phone padding sees the measured sheet.
         map.resize()
+        easeToBounds(map, boundsFor(allRouteCoords(trip.route)), {
+          padding: padding(map, 'whole'),
+          duration: 0,
+          pitch: 0,
+        })
+        writeCamera(cameraHost, map)
 
         // Reveal (cross-fade from the skeleton) on the first idle — the route
         // is on the map, and no DEM has been requested. Hillshade/contours/3D
@@ -699,6 +741,16 @@ export default function MapView({
           onReadyRef.current?.()
           el.classList.add('map-live')
           map?.resize()
+          // Re-fit after the reveal resize so phone whole-day padding sees
+          // the final layout (sheet height and canvas size).
+          if (map && modeRef.current === 'whole') {
+            easeToBounds(map, boundsFor(allRouteCoords(trip.route)), {
+              padding: padding(map, 'whole'),
+              duration: 0,
+              pitch: 0,
+            })
+            writeCamera(cameraHost, map)
+          }
         }
         map.once('idle', reveal)
       })

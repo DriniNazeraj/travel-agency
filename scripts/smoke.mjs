@@ -373,6 +373,47 @@ async function assertSheetHandle(page, name, shots) {
   return info
 }
 
+
+/** Phone first view: every stop pin sits in the visible map (below 120px, above the sheet). */
+async function assertFirstViewPins(page, name, shots) {
+  const info = await page.evaluate(() => {
+    const sheet =
+      document.querySelector('.sheet-snap-body') ?? document.querySelector('[data-sheet]')
+    const sr = sheet?.getBoundingClientRect()
+    const sheetTop = sr?.top ?? 0
+    const padTop = 120
+    const needed = ['kafe-flora', 'rest-shkoder', 'lepushe', 'maja-e-vajushes']
+    const pins = [...document.querySelectorAll('.map-pin')].map((p) => {
+      const b = p.getBoundingClientRect()
+      const cx = b.x + b.width / 2
+      const cy = b.y + b.height / 2
+      // The whole pin, not just its centre, must sit in the visible band
+      // (below the 120px control/attribution stack, above the sheet).
+      const inArea =
+        b.top >= padTop - 0.5 &&
+        b.bottom <= sheetTop + 0.5 &&
+        b.left >= 0 &&
+        b.right <= window.innerWidth
+      return {
+        placeId: p.dataset.placeId,
+        cx: +cx.toFixed(1),
+        cy: +cy.toFixed(1),
+        top: +b.top.toFixed(1),
+        bottom: +b.bottom.toFixed(1),
+        inArea,
+      }
+    })
+    const missing = needed.filter((id) => !pins.some((p) => p.placeId === id))
+    const ok = missing.length === 0 && pins.length >= 4 && pins.every((p) => p.inArea)
+    return { ok, sheetTop: +sheetTop.toFixed(1), padTop, missing, pins }
+  })
+  await page.screenshot({ path: path.join(shots, 'phone-whole-day-v132.png'), fullPage: false })
+  if (!info.ok) {
+    throw new Error(`${name}: first-view pins not in the visible map area: ${JSON.stringify(info)}`)
+  }
+  return info
+}
+
 async function runAt(browser, { name, width, height, alsoClimb = true }) {
   const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 2 })
   const pageErrors = []
@@ -532,8 +573,10 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
   // Designer: legend and attribution must not overlap at 390px (phone).
   let legend = null
   let sheetHandle = null
+  let firstViewPins = null
   if (width === 390) {
     legend = await assertLegendClearOfAttribution(page, `${name}-drive`)
+    firstViewPins = await assertFirstViewPins(page, name, shots)
     sheetHandle = await assertSheetHandle(page, name, shots)
   }
 
@@ -918,6 +961,7 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
     mapViewReqs,
     paneAria,
     sheetHandle,
+    firstViewPins,
     climbDem,
     climbDemTotal,
     visitDem,
@@ -988,6 +1032,11 @@ if (results.some((r) => r.width === 390 && !r.paneAria?.ok)) {
 if (results.some((r) => r.width === 390 && !r.sheetHandle?.ok)) {
   const bad = results.filter((r) => r.width === 390)
   console.error('FAIL: sheet handle at 390', JSON.stringify(bad.map((r) => r.sheetHandle), null, 2))
+  process.exit(1)
+}
+if (results.some((r) => r.width === 390 && !r.firstViewPins?.ok)) {
+  const bad = results.filter((r) => r.width === 390)
+  console.error('FAIL: first-view pins at 390', JSON.stringify(bad.map((r) => r.firstViewPins), null, 2))
   process.exit(1)
 }
 if (results.some((r) => r.width >= 1280 && !r.terrain3d?.ok)) {
