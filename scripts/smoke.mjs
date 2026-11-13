@@ -129,6 +129,26 @@ function demZoom(u) {
   return m ? Number(m[1]) : null
 }
 
+/** Count and SUM transfer/body sizes of every DEM request. Dedupes identical
+ *  URL+bytes only when CDP and page events both recorded the same fetch. */
+function summarizeDem(reqs) {
+  const seen = new Set()
+  const unique = []
+  for (const d of reqs) {
+    const key = `${d.status}|${d.z}|${d.url}|${d.bytes}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(d)
+  }
+  return {
+    count: unique.length,
+    bytes: unique.reduce((s, d) => s + (d.bytes || 0), 0),
+    maxZ: unique.reduce((m, d) => Math.max(m, d.z ?? 0), 0),
+    overzoom: unique.filter((d) => (d.z ?? 0) > 11).length,
+    tiles: unique.map((d) => ({ z: d.z, bytes: d.bytes, url: d.url.replace(/^https?:\/\/[^/]+/, '') })),
+  }
+}
+
 const STEP_PLACE = {
   1: 'kafe-flora',
   2: 'rest-shkoder',
@@ -238,6 +258,63 @@ async function waitPinOnCanvas(page, placeId, timeout = 10000) {
   return { ...last, pin, ok: false }
 }
 
+/** Active stop's pin is on-canvas and in the central ~76% of the map (padded-center). */
+function pinNearCenter(pin, map) {
+  if (!pinOnCanvas(pin, map)) return false
+  const dx = Math.abs(pin.cx - (map.x + map.w / 2))
+  const dy = Math.abs(pin.cy - (map.y + map.h / 2))
+  return dx <= map.w * 0.38 && dy <= map.h * 0.38
+}
+
+async function waitPinNearCenter(page, placeId, timeout = 10000) {
+  const t0 = Date.now()
+  let last = null
+  while (Date.now() - t0 < timeout) {
+    last = await readPins(page)
+    const pin = last.pins.find((p) => p.placeId === placeId)
+    if (pinNearCenter(pin, last.map)) return { ...last, pin, ok: true, nearCenter: true }
+    await page.waitForTimeout(150)
+  }
+  const pin = last?.pins.find((p) => p.placeId === placeId)
+  return { ...last, pin, ok: false, nearCenter: pinNearCenter(pin, last?.map) }
+}
+
+async function arrowToStep(page, key, step, shots, name) {
+  const arrived = async (timeout) =>
+    page
+      .waitForFunction(
+        (n) => document.querySelector(`button[data-step="${n}"]`)?.getAttribute('data-active') === 'true',
+        step,
+        { timeout },
+      )
+      .then(() => true)
+      .catch(() => false)
+  // Send the arrow from the adjacent step (the one we should already be on),
+  // not from whatever scroll-follow last marked active.
+  const from = key === 'ArrowDown' ? step - 1 : step + 1
+  const fromBtn = page.locator(`button[data-step="${from}"]`)
+  await fromBtn.scrollIntoViewIfNeeded()
+  await fromBtn.focus()
+  await fromBtn.press(key)
+  if (await arrived(4000)) return
+  await fromBtn.scrollIntoViewIfNeeded()
+  await fromBtn.focus()
+  await fromBtn.press(key)
+  if (await arrived(5000)) return
+  const state = await page.evaluate(() => ({
+    active: document.querySelector('[data-active-stop]')?.getAttribute('data-active-stop'),
+    focused: document.activeElement?.getAttribute?.('data-step'),
+    btn: [...document.querySelectorAll('button[data-step]')].map((b) => ({
+      step: b.getAttribute('data-step'),
+      active: b.getAttribute('data-active'),
+      focused: b === document.activeElement,
+    })),
+  }))
+  await page.screenshot({ path: path.join(shots, `${name}-3d-kb-fail-${key}-${step}.png`), fullPage: false })
+  throw new Error(`${name}: keyboard ${key} did not activate step ${step}: ${JSON.stringify(state)}`)
+}
+
+
 
 async function runAt(browser, { name, width, height, alsoClimb = true }) {
   const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 2 })
@@ -255,6 +332,51 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
   page.on('load', () => {
     loadFired = true
   })
+  // CDP transfer sizes: encodedDataLength is the on-the-wire byte count per request.
+  const cdpDem = new Map()
+  const cdp = await page.context().newCDPSession(page)
+  await cdp.send('Network.enable')
+  cdp.on('Network.responseReceived', ({ requestId, response }) => {
+    if (isDemUrl(response.url)) {
+      cdpDem.set(requestId, { url: response.url, encoded: 0 })
+    }
+  })
+  cdp.on('Network.loadingFinished', ({ requestId, encodedDataLength }) => {
+    const r = cdpDem.get(requestId)
+    if (r) r.encoded = encodedDataLength ?? 0
+  })
+  const applyCdpSizes = () => {
+    // Match unused CDP records to demReqs with the same URL and a smaller byte count.
+    const leftover = [...cdpDem.values()]
+    for (const rec of demReqs) {
+      const i = leftover.findIndex((c) => c.url === rec.url && !c._used)
+      if (i < 0) continue
+      const c = leftover[i]
+      c._used = true
+      if ((c.encoded || 0) > rec.bytes) rec.bytes = c.encoded
+    }
+    // CDP-only requests that Playwright's page 'response' missed (workers).
+    for (const c of leftover) {
+      if (c._used || !c.encoded) continue
+      const existing = demReqs.find((d) => d.url === c.url)
+      if (existing) {
+        if (c.encoded > existing.bytes) existing.bytes = c.encoded
+        c._used = true
+        continue
+      }
+      c._used = true
+      demReqs.push({
+        url: c.url,
+        status: 200,
+        bytes: c.encoded,
+        z: demZoom(c.url),
+        afterLoad: loadFired,
+        afterInteract: interacted,
+        fromCdp: true,
+      })
+    }
+  }
+
   page.on('request', (req) => {
     const u = req.url()
     if (isMapViewChunk(u)) {
@@ -277,12 +399,28 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
         afterInteract: interacted,
       }
       demReqs.push(rec)
+      // Start every size probe immediately so Chrome does not evict the body.
+      // Sum transfer sizes of ALL DEM requests — content-length is often missing,
+      // and a late res.body() only lands one tile (~137 KB).
       demBodyWaits.push(
-        res.body()
-          .then((b) => {
-            rec.bytes = b.length
-          })
-          .catch(() => {}),
+        (async () => {
+          const take = (n) => {
+            if (Number.isFinite(n) && n > rec.bytes) rec.bytes = n
+          }
+          take(Number(res.headers()['content-length'] || 0))
+          try {
+            const b = await res.body()
+            take(b?.length ?? 0)
+          } catch {
+            /* body may already be evicted; fall through */
+          }
+          try {
+            const s = await res.request().sizes()
+            take(s?.responseBodySize ?? 0)
+          } catch {
+            /* cached or worker request */
+          }
+        })(),
       )
     }
   })
@@ -298,6 +436,7 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
   // Settle: any wrongly-eager DEM would show up here, before we interact.
   await page.waitForTimeout(1500)
   await Promise.all(demBodyWaits)
+  applyCdpSizes()
   const firstViewDem = demReqs.filter((d) => !d.afterInteract).map((d) => ({ url: d.url, bytes: d.bytes, z: d.z }))
   const mapViewBeforeLoad = mapViewReqs.filter((r) => !r.afterLoad)
   if (width >= 1280 && firstViewDem.length) {
@@ -394,6 +533,8 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
 
   let climbShot = null
   let firstClimbDem = null
+  let visitDem = null
+  let threeDClimbDem = null
   if (alsoClimb) {
     // Return to whole day then open The climb (inset or toggle)
     const climbBtn = page.locator('[data-testid="view-climb"]')
@@ -407,13 +548,19 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
       await page.waitForTimeout(1200)
       await page.screenshot({ path: path.join(shots, `${name}-climb.png`), fullPage: false })
       climbShot = `${name}-climb.png`
+      if (width === 390) {
+        await page.screenshot({ path: path.join(shots, 'phone-climb-z11.png'), fullPage: false })
+      }
+      // Let in-flight DEM tiles finish, then read every transfer size.
+      await page.waitForTimeout(800)
       await Promise.all(demBodyWaits)
+      applyCdpSizes()
       // Snapshot DEM used for the first climb, before the later 3D keyboard tour.
-      firstClimbDem = {
-        count: demReqs.filter((d) => d.afterInteract && d.status < 400).length,
-        bytes: demReqs.filter((d) => d.afterInteract && d.status < 400).reduce((s, d) => s + (d.bytes || 0), 0),
-        maxZ: demReqs.filter((d) => d.afterInteract && d.status < 400).reduce((m, d) => Math.max(m, d.z ?? 0), 0),
-        overzoom: demReqs.filter((d) => d.afterInteract && d.status < 400 && (d.z ?? 0) > 12).length,
+      firstClimbDem = summarizeDem(demReqs.filter((d) => d.afterInteract && d.status < 400))
+      if (firstClimbDem.count > 1 && firstClimbDem.bytes < 50_000) {
+        throw new Error(
+          `${name}: climb DEM byte total looks like a single missed-body sum: ${JSON.stringify(firstClimbDem)}`,
+        )
       }
       // Attribution must still be clear in climb view
       await assertAttributionVisible(page, `${name}-climb`)
@@ -430,8 +577,9 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
     step7AtEnd = await page.evaluate(async () => {
       const root = document.querySelector('[data-timeline-scroll]')
       if (!root) return { ok: false, reason: 'no-scroll-root' }
+      // Arm scroll-follow the same way a real wheel/scrollbar gesture does.
+      root.dispatchEvent(new WheelEvent('wheel', { deltaY: 800, bubbles: true }))
       root.scrollTop = root.scrollHeight
-      // Allow the scroll-follow listener to run.
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
       await new Promise((r) => setTimeout(r, 120))
       root.dispatchEvent(new Event('scroll'))
@@ -547,6 +695,15 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
     }
     legend = { ...(legend ?? {}), sheetFull: fullLegend, fullAttrib }
     await page.screenshot({ path: path.join(shots, `${name}-sheet-full.png`), fullPage: false })
+
+    // Full phone visit: walk every step so we can report total DEM after the whole tour.
+    for (let step = 1; step <= 7; step++) {
+      await page.locator(`button[data-step="${step}"]`).click()
+      await page.waitForTimeout(500)
+    }
+    await Promise.all(demBodyWaits)
+    applyCdpSizes()
+    visitDem = summarizeDem(demReqs.filter((d) => d.afterInteract && d.status < 400))
   }
 
   // --- Desktop 3D on: climb → step 1 → climb again → keyboard through steps ---
@@ -568,6 +725,9 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
     if (!climb1.ok) {
       throw new Error(`${name}: 3D The climb did not frame Lëpushë and the summit in the padded viewport: ${JSON.stringify(climb1)}`)
     }
+    await Promise.all(demBodyWaits)
+    applyCdpSizes()
+    threeDClimbDem = summarizeDem(demReqs.filter((d) => d.afterInteract && d.status < 400))
 
     await page.locator('button[data-step="1"]').click()
     const step1 = await waitPinOnCanvas(page, STEP_PLACE[1])
@@ -583,6 +743,31 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
       throw new Error(`${name}: 3D The climb after step 1 did not re-frame the hike: ${JSON.stringify(climb2)}`)
     }
 
+    // QA: with 3D on, Enter through all 7 steps ~900ms apart — the next
+    // key is sent without waiting for the previous ease to finish. After
+    // each request settles (or just before the next key), the active
+    // stop's pin must be on-canvas near center.
+    const enterResults = []
+    for (let step = 1; step <= 7; step++) {
+      const tStart = Date.now()
+      const btn = page.locator(`button[data-step="${step}"]`)
+      await btn.scrollIntoViewIfNeeded()
+      await btn.focus()
+      await page.keyboard.press('Enter')
+      // Leave a sliver of the 900ms gap for the next key; last step can fully settle.
+      const budget = step < 7 ? 880 : 8000
+      const st = await waitPinNearCenter(page, STEP_PLACE[step], budget)
+      enterResults.push({ step, ok: st.ok, nearCenter: st.nearCenter, camera: st.camera, pin: st.pin })
+      if (step < 7) {
+        const used = Date.now() - tStart
+        if (used < 900) await page.waitForTimeout(900 - used)
+      }
+    }
+    await page.screenshot({ path: path.join(shots, `${name}-3d-enter-tour.png`), fullPage: false })
+    if (enterResults.some((r) => !r.ok)) {
+      throw new Error(`${name}: 3D Enter tour (900ms) missed a target: ${JSON.stringify(enterResults)}`)
+    }
+
     // Keyboard ArrowDown / ArrowUp through every step; each target must stay on-canvas.
     await page.locator('button[data-step="1"]').click()
     const firstKb = await waitPinOnCanvas(page, STEP_PLACE[1])
@@ -592,12 +777,7 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
     await page.locator('button[data-step="1"]').focus()
     const kbSteps = []
     for (let step = 2; step <= 7; step++) {
-      await page.keyboard.press('ArrowDown')
-      await page.waitForFunction(
-        (n) => document.querySelector(`button[data-step="${n}"]`)?.getAttribute('data-active') === 'true',
-        step,
-        { timeout: 5000 },
-      )
+      await arrowToStep(page, 'ArrowDown', step, shots, name)
       const st = await waitPinOnCanvas(page, STEP_PLACE[step])
       kbSteps.push({ dir: 'down', step, ok: st.ok, camera: st.camera, pin: st.pin })
       if (!st.ok) {
@@ -607,12 +787,7 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
     }
     await page.screenshot({ path: path.join(shots, `${name}-3d-kb-down.png`), fullPage: false })
     for (let step = 6; step >= 1; step--) {
-      await page.keyboard.press('ArrowUp')
-      await page.waitForFunction(
-        (n) => document.querySelector(`button[data-step="${n}"]`)?.getAttribute('data-active') === 'true',
-        step,
-        { timeout: 5000 },
-      )
+      await arrowToStep(page, 'ArrowUp', step, shots, name)
       const st = await waitPinOnCanvas(page, STEP_PLACE[step])
       kbSteps.push({ dir: 'up', step, ok: st.ok, camera: st.camera, pin: st.pin })
       if (!st.ok) {
@@ -622,10 +797,11 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
     }
     await page.screenshot({ path: path.join(shots, `${name}-3d-kb-up.png`), fullPage: false })
     terrain3d = {
-      ok: climb1.ok && step1.ok && climb2.ok && kbSteps.every((s) => s.ok),
+      ok: climb1.ok && step1.ok && climb2.ok && kbSteps.every((s) => s.ok) && enterResults.every((s) => s.ok),
       climb1: { ok: climb1.ok, in3: climb1.in3, in4: climb1.in4, camera: climb1.camera, mode: climb1.mode },
       step1: { ok: step1.ok, camera: step1.camera, pin: step1.pin },
       climb2: { ok: climb2.ok, in3: climb2.in3, in4: climb2.in4, camera: climb2.camera, mode: climb2.mode },
+      enterTour: enterResults,
       kbSteps,
     }
   }
@@ -654,13 +830,8 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
   errors.push(...real.map((e) => `${name}: ${e}`))
   errors.push(...glyphErr.filter((e) => !real.includes(e)).map((e) => `${name}: ${e}`))
   await Promise.all(demBodyWaits)
-  const climbDemReqs = demReqs.filter((d) => d.afterInteract && d.status < 400)
-  const climbDemTotal = {
-    count: climbDemReqs.length,
-    bytes: climbDemReqs.reduce((s, d) => s + (d.bytes || 0), 0),
-    maxZ: climbDemReqs.reduce((m, d) => Math.max(m, d.z ?? 0), 0),
-    overzoom: climbDemReqs.filter((d) => (d.z ?? 0) > 12).length,
-  }
+  applyCdpSizes()
+  const climbDemTotal = summarizeDem(demReqs.filter((d) => d.afterInteract && d.status < 400))
   const climbDem = firstClimbDem ?? climbDemTotal
   const firstViewDemReport = {
     count: firstViewDem.length,
@@ -688,7 +859,16 @@ async function runAt(browser, { name, width, height, alsoClimb = true }) {
     paneAria,
     climbDem,
     climbDemTotal,
+    visitDem,
+    threeDClimbDem,
     terrain3d,
+    demConsumers: {
+      // hillshade + setTerrain share raster-dem `dem`; contours use DemSource;
+      // all four are capped at maxzoom 11 and share one S3 fetch pipeline.
+      shared: true,
+      maxzoom: 11,
+      sources: ['DemSource', 'raster-dem dem (hillshade + terrain)', 'contours vector'],
+    },
   }
 }
 
@@ -749,14 +929,33 @@ if (results.some((r) => r.width >= 1280 && !r.terrain3d?.ok)) {
   console.error('FAIL: 3D climb / keyboard camera', JSON.stringify(bad.map((r) => ({ name: r.name, terrain3d: r.terrain3d })), null, 2))
   process.exit(1)
 }
+if (results.some((r) => (r.climbDem?.maxZ ?? 0) > 11 || (r.climbDem?.overzoom ?? 0) > 0)) {
+  const bad = results.filter((r) => (r.climbDem?.maxZ ?? 0) > 11 || (r.climbDem?.overzoom ?? 0) > 0)
+  console.error('FAIL: DEM zoom exceeded maxzoom 11', JSON.stringify(bad.map((r) => ({ name: r.name, climbDem: r.climbDem })), null, 2))
+  process.exit(1)
+}
 console.log('SMOKE OK')
 for (const r of results) {
   const cd = r.climbDem
+  const tot = r.climbDemTotal
   console.log(
-    `${r.name}: firstView DEM ${r.firstViewDem?.count ?? 0} (${r.firstViewDem?.bytes ?? 0} B); climb DEM ${cd?.count ?? 0} tiles / ${cd?.bytes ?? 0} B (max z=${cd?.maxZ ?? '?'}, z>12: ${cd?.overzoom ?? '?'}); MapView before load: ${(r.mapViewBeforeLoad ?? []).length}` +
+    `${r.name}: firstView DEM ${r.firstViewDem?.count ?? 0} (${r.firstViewDem?.bytes ?? 0} B); climb DEM ${cd?.count ?? 0} tiles / ${cd?.bytes ?? 0} B (max z=${cd?.maxZ ?? '?'}, z>11: ${cd?.overzoom ?? '?'})` +
+      (tot && (tot.count !== cd?.count || tot.bytes !== cd?.bytes)
+        ? `; all-after-interact ${tot.count} tiles / ${tot.bytes} B`
+        : '') +
+      `; MapView before load: ${(r.mapViewBeforeLoad ?? []).length}` +
       (r.terrain3d
-        ? `; 3D climb1=${r.terrain3d.climb1?.ok} climb2=${r.terrain3d.climb2?.ok} kb=${(r.terrain3d.kbSteps ?? []).filter((s) => s.ok).length}/${(r.terrain3d.kbSteps ?? []).length}`
+        ? `; 3D climb1=${r.terrain3d.climb1?.ok} climb2=${r.terrain3d.climb2?.ok} enter=${(r.terrain3d.enterTour ?? []).filter((s) => s.ok).length}/${(r.terrain3d.enterTour ?? []).length} kb=${(r.terrain3d.kbSteps ?? []).filter((s) => s.ok).length}/${(r.terrain3d.kbSteps ?? []).length}`
         : ''),
   )
+}
+console.log('DEM totals (summed transfer sizes of all DEM requests; every consumer maxzoom 11, shared DemSource):')
+for (const r of results) {
+  const cd = r.climbDem
+  const vis = r.visitDem
+  const td = r.threeDClimbDem
+  console.log(`  ${r.name} climb: ${cd?.count ?? 0} tiles / ${cd?.bytes ?? 0} B (max z=${cd?.maxZ ?? '?'})`)
+  if (vis) console.log(`  ${r.name} full visit: ${vis.count} tiles / ${vis.bytes} B (max z=${vis.maxZ})`)
+  if (td) console.log(`  ${r.name} 3D+climb: ${td.count} tiles / ${td.bytes} B (max z=${td.maxZ})`)
 }
 console.log('screenshots:', fs.readdirSync(shots).join(', '))

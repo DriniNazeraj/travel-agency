@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import mlcontour from 'maplibre-contour'
@@ -21,8 +21,8 @@ export interface MapViewProps {
 }
 
 const DEM_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'
-/** Cap overzoom so climb (zoom 13–14) reuses z12 tiles instead of pulling a z14 band. */
-const DEM_MAXZOOM = 12
+/** Cap overzoom so climb (zoom 13–14) reuses z11 tiles instead of pulling a z12–14 band. */
+const DEM_MAXZOOM = 11
 
 const MOUNTAIN_SVG =
   '<svg class="map-pin-mountain" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 3 4 8 5-5 5 15H2L8 3z"/></svg>'
@@ -105,6 +105,8 @@ function resetPadding(map: maplibregl.Map) {
   map.setPadding({ top: 0, right: 0, bottom: 0, left: 0 })
 }
 
+type CamGen = { current: number; cleanup?: () => void }
+
 type CamMoveOpts = {
   padding: maplibregl.PaddingOptions
   pitch: number
@@ -113,18 +115,112 @@ type CamMoveOpts = {
   bearing?: number
 }
 
+type CamTarget = { lng: number; lat: number; zoom: number; pitch: number; bearing: number }
+
+function lngLatOf(center: maplibregl.LngLatLike): { lng: number; lat: number } {
+  if (Array.isArray(center)) return { lng: Number(center[0]), lat: Number(center[1]) }
+  const c = center as { lng: number; lat: number }
+  return { lng: c.lng, lat: c.lat }
+}
+
+
+/**
+ * Apply an ease on the next frame (so we are not inside a previous ease's
+ * synchronous `_onEaseEnd` / `moveend` — MapLibre can drop the new jump there)
+ * and re-assert the target on `moveend` and a timeout. Only the newest `gen`
+ * applies; a stale callback is a no-op. If the ease was dropped, jumpTo the
+ * latest target so it always wins.
+ */
+function scheduleEase(
+  map: maplibregl.Map,
+  genBox: CamGen,
+  gen: number,
+  duration: number,
+  easeOpts: maplibregl.EaseToOptions,
+  target: CamTarget,
+  onSettled?: () => void,
+) {
+  // Cancel any previous ensure/timeout so a stale jumpTo cannot overwrite
+  // the newest target after the next keyboard request.
+  genBox.cleanup?.()
+  genBox.cleanup = undefined
+
+  const stillMine = () => gen === genBox.current && !!map.getContainer()
+
+  const apply = () => {
+    if (!stillMine()) {
+      return
+    }
+    map.stop()
+    map.easeTo({ ...easeOpts, essential: true, duration: Math.max(0, duration) })
+  }
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  let done = false
+  const finish = () => {
+    if (done) return
+    done = true
+    if (timeoutId != null) clearTimeout(timeoutId)
+    timeoutId = undefined
+    map.off('moveend', finish)
+    if (genBox.cleanup === cleanup) genBox.cleanup = undefined
+    if (!stillMine()) {
+      return
+    }
+    const c = map.getCenter()
+    const far =
+      Math.hypot(c.lng - target.lng, c.lat - target.lat) > 0.015 ||
+      Math.abs(map.getZoom() - target.zoom) > 0.85 ||
+      Math.abs(map.getPitch() - target.pitch) > 8
+    if (far) {
+      map.stop()
+      map.jumpTo({
+        center: [target.lng, target.lat],
+        zoom: target.zoom,
+        pitch: target.pitch,
+        bearing: target.bearing,
+      })
+    }
+    onSettled?.()
+  }
+  const cleanup = () => {
+    done = true
+    if (timeoutId != null) clearTimeout(timeoutId)
+    timeoutId = undefined
+    map.off('moveend', finish)
+  }
+  genBox.cleanup = cleanup
+
+  // Apply synchronously, after stop() has already run the previous
+  // `_onEaseEnd` / moveend. Stale ensures were cancelled above, so they
+  // cannot drop or overwrite this jump. Avoid rAF — a deferred start
+  // made a 900ms keyboard tour always land one stop behind.
+  apply()
+  if (duration <= 0) {
+    finish()
+    return
+  }
+  if (!stillMine()) return
+  map.once('moveend', finish)
+  timeoutId = setTimeout(finish, duration + 120)
+}
+
 /**
  * Stop in-flight motion, drop stale padding, compute a camera with
  * `cameraForBounds(bounds, {padding, pitch, bearing})` (the fit math is 2D —
  * MapLibre does not model pitch or terrain elevation), then `easeTo` that
  * camera with the requested pitch. Retries with smaller padding if the first
- * compute cannot fit.
+ * compute cannot fit. `genBox`/`gen` make only the newest request apply.
  */
 function easeToBounds(
   map: maplibregl.Map,
   bounds: maplibregl.LngLatBounds,
   opts: CamMoveOpts,
+  genBox?: CamGen,
+  gen?: number,
 ): boolean {
+  const box = genBox ?? { current: 0 }
+  const my = gen ?? ++box.current
   map.stop()
   resetPadding(map)
 
@@ -138,23 +234,34 @@ function easeToBounds(
   let cam = compute(opts.padding)
   if (!cam) cam = compute({ top: 48, right: 48, bottom: 48, left: 48 })
   if (!cam) cam = compute({ top: 24, right: 24, bottom: 24, left: 24 })
-  if (!cam || cam.center == null || cam.zoom == null) return false
+  if (!cam || cam.center == null || cam.zoom == null) {
+    return false
+  }
+  if (my !== box.current) {
+    return false
+  }
 
-  // A 2D-fitted zoom is tight once pitch is applied (trapezoid footprint).
   let zoom = cam.zoom
   if (pitch > 1) {
     const shrink = Math.log2(Math.max(0.55, Math.cos((pitch * Math.PI) / 180)))
     zoom = Math.min(maxZoom, Math.max(0, zoom + shrink))
   }
 
-  map.easeTo({
-    center: cam.center,
-    zoom,
-    bearing: cam.bearing ?? bearing,
-    pitch,
-    duration: Math.max(0, opts.duration),
-    essential: true,
-  })
+  const ll = lngLatOf(cam.center)
+  scheduleEase(
+    map,
+    box,
+    my,
+    opts.duration,
+    {
+      center: cam.center,
+      zoom,
+      bearing: cam.bearing ?? bearing,
+      pitch,
+      essential: true,
+    },
+    { lng: ll.lng, lat: ll.lat, zoom, pitch, bearing: cam.bearing ?? bearing },
+  )
   return true
 }
 
@@ -163,9 +270,16 @@ function easeToPoint(
   map: maplibregl.Map,
   center: [number, number],
   opts: { zoom: number; pitch: number; padding: maplibregl.PaddingOptions; duration: number },
+  genBox?: CamGen,
+  gen?: number,
 ): boolean {
+  const box = genBox ?? { current: 0 }
+  const my = gen ?? ++box.current
   map.stop()
   resetPadding(map)
+  if (my !== box.current) {
+    return false
+  }
 
   const d = 0.0015
   const bounds = new maplibregl.LngLatBounds(
@@ -178,29 +292,36 @@ function easeToPoint(
     bearing: 0,
     maxZoom: opts.zoom,
   })
-  if (cam && cam.center != null) {
-    map.easeTo({
-      center: cam.center,
-      zoom: opts.zoom,
-      bearing: 0,
-      pitch: opts.pitch,
-      duration: Math.max(0, opts.duration),
-      essential: true,
-    })
-    return true
-  }
   const p = opts.padding
   const ox = ((p.left ?? 0) - (p.right ?? 0)) / 2
   const oy = ((p.top ?? 0) - (p.bottom ?? 0)) / 2
-  map.easeTo({
-    center,
-    zoom: opts.zoom,
-    pitch: opts.pitch,
-    bearing: 0,
-    offset: [ox, oy],
-    duration: Math.max(0, opts.duration),
-    essential: true,
-  })
+  const dest = cam?.center != null ? lngLatOf(cam.center) : { lng: center[0], lat: center[1] }
+  const easeOpts: maplibregl.EaseToOptions =
+    cam && cam.center != null
+      ? {
+          center: cam.center,
+          zoom: opts.zoom,
+          bearing: 0,
+          pitch: opts.pitch,
+          essential: true,
+        }
+      : {
+          center,
+          zoom: opts.zoom,
+          pitch: opts.pitch,
+          bearing: 0,
+          offset: [ox, oy],
+          essential: true,
+        }
+
+  scheduleEase(
+    map,
+    box,
+    my,
+    opts.duration,
+    easeOpts,
+    { lng: dest.lng, lat: dest.lat, zoom: opts.zoom, pitch: opts.pitch, bearing: 0 },
+  )
   return true
 }
 
@@ -352,6 +473,9 @@ function addRouteLayers(map: maplibregl.Map, trip: Trip) {
 
 function addTerrainLayers(map: maplibregl.Map) {
   if (map.getSource('dem')) return
+  // Every DEM consumer is capped at DEM_MAXZOOM (11): DemSource itself
+  // (shared protocol + contour fetches), the raster-dem `dem` source
+  // (hillshade + setTerrain share it), and the contours vector source.
   const demSource = new mlcontour.DemSource({
     url: DEM_URL,
     encoding: 'terrarium',
@@ -374,9 +498,9 @@ function addTerrainLayers(map: maplibregl.Map) {
     tiles: [
       demSource.contourProtocolUrl({
         multiplier: 1,
+        // z11 covers the climb (map zoom 13–14 overzooms). 100 m minor, 250 m index.
         thresholds: {
-          11: [200, 1000],
-          12: [50, 250],
+          11: [100, 250],
         },
       }),
     ],
@@ -395,7 +519,7 @@ function addTerrainLayers(map: maplibregl.Map) {
         'hillshade-shadow-color': '#1F3D32',
         'hillshade-highlight-color': '#F8F4EC',
         'hillshade-accent-color': '#2F5A48',
-        'hillshade-exaggeration': 0.35,
+        'hillshade-exaggeration': 0.4,
       },
     },
     before,
@@ -488,6 +612,7 @@ export default function MapView({
   const modeRef = useRef(mode)
   modeRef.current = mode
   const camKeyRef = useRef({ activeId, mode })
+  const camGenRef = useRef<CamGen>({ current: 0 })
 
   useEffect(() => {
     const el = containerRef.current
@@ -619,7 +744,9 @@ export default function MapView({
     setLegEmphasis(map, activeLegForStop(stop?.order ?? 1))
   }, [activeId, trip.stops])
 
-  useEffect(() => {
+  // useLayoutEffect so the camera move starts in the same turn as the
+  // keyboard/click handler — a 900ms Enter tour must not start one frame late.
+  useLayoutEffect(() => {
     const map = mapRef.current
     if (!map || !loadedRef.current) return
     const reduced = prefersReducedMotion()
@@ -634,11 +761,22 @@ export default function MapView({
     const only3d = prev.activeId === activeId && prev.mode === mode
     camKeyRef.current = { activeId, mode }
 
+    // Newest *target* always wins. Do not bump the token or cancel an
+    // in-flight ease when this effect re-runs for the same stop (a new
+    // `trip` identity or a parent render used to drop the jump and then
+    // take the only3d path, which does not re-issue the center move).
+    const box = camGenRef.current
+    const targetChanged = !only3d
+    if (targetChanged) {
+      box.current += 1
+      box.cleanup?.()
+      box.cleanup = undefined
+    }
+    const gen = box.current
     let cancelled = false
+    const stillMine = () => !cancelled && gen === box.current
+
     const frameClimb = async (pitch: number, duration: number) => {
-      // Move immediately — do not wait for DEM idle first (that left an
-      // in-flight flyTo running and let cancelled flags swallow the fit).
-      // If 3D is on, attach terrain, then compute in 2D and easeTo with pitch.
       if (pitch > 0) {
         addTerrainLayers(map)
         if (map.getSource('dem') && !map.getTerrain()) {
@@ -649,50 +787,86 @@ export default function MapView({
           }
         }
       }
-      if (cancelled) return
-      const ok = easeToBounds(map, hikeBounds(trip), {
-        padding: padding(map, 'climb'),
-        pitch,
-        duration,
-        maxZoom: 14,
-        bearing: 0,
-      })
+      if (!stillMine()) return
+      const ok = easeToBounds(
+        map,
+        hikeBounds(trip),
+        {
+          padding: padding(map, 'climb'),
+          pitch,
+          duration,
+          maxZoom: 14,
+          bearing: 0,
+        },
+        box,
+        gen,
+      )
       if (!ok) return
       await waitIdle(map, 2000)
-      if (cancelled) return
+      if (!stillMine()) return
       refreshMarkers(markersRef.current)
     }
 
+    // Click and keyboard both change activeId and come through this same path.
     if (only3d) {
       if (mode === 'climb') {
         addTerrainLayers(map)
         void frameClimb(wantPitch('climb'), reduced ? 0 : 700)
       } else if (mode === 'whole') {
         if (map.getPitch() > 0.5) {
-          map.stop()
-          map.easeTo({ pitch: 0, duration: reduced ? 0 : 400, essential: true })
+          box.current += 1
+          const pitchGen = box.current
+          const c = map.getCenter()
+          scheduleEase(
+            map,
+            box,
+            pitchGen,
+            reduced ? 0 : 400,
+            { pitch: 0, essential: true },
+            { lng: c.lng, lat: c.lat, zoom: map.getZoom(), pitch: 0, bearing: map.getBearing() },
+          )
         }
       } else {
         const stop = trip.stops.find((s) => s.id === activeId)
         const pitch = wantPitch('stop', stop?.order)
         if (Math.abs(map.getPitch() - pitch) > 1) {
-          map.stop()
-          map.easeTo({ pitch, duration: reduced ? 0 : 500, essential: true })
+          box.current += 1
+          const pitchGen = box.current
+          const c = map.getCenter()
+          scheduleEase(
+            map,
+            box,
+            pitchGen,
+            reduced ? 0 : 500,
+            { pitch, essential: true },
+            { lng: c.lng, lat: c.lat, zoom: map.getZoom(), pitch, bearing: 0 },
+          )
         }
       }
       return () => {
         cancelled = true
+        // Do not bump the token: a same-target re-run must not cancel a
+        // center ease that is still in flight.
       }
     }
 
     if (mode === 'whole') {
-      easeToBounds(map, boundsFor(allRouteCoords(trip.route)), {
-        padding: padding(map, 'whole'),
-        duration: reduced ? 0 : 800,
-        pitch: 0,
-      })
+      easeToBounds(
+        map,
+        boundsFor(allRouteCoords(trip.route)),
+        {
+          padding: padding(map, 'whole'),
+          duration: reduced ? 0 : 800,
+          pitch: 0,
+        },
+        box,
+        gen,
+      )
       return () => {
         cancelled = true
+        box.cleanup?.()
+        box.cleanup = undefined
+        box.current++
       }
     }
     if (mode === 'climb') {
@@ -700,20 +874,36 @@ export default function MapView({
       void frameClimb(wantPitch('climb'), reduced ? 0 : 800)
       return () => {
         cancelled = true
+        box.cleanup?.()
+        box.cleanup = undefined
+        box.current++
       }
     }
     const stop: Stop | undefined = trip.stops.find((s) => s.id === activeId)
     if (!stop) return
-    easeToPoint(map, [stop.lng, stop.lat], {
-      zoom: 13,
-      padding: padding(map, 'stop'),
-      pitch: wantPitch('stop', stop.order),
-      duration: reduced ? 0 : 800,
-    })
+    easeToPoint(
+      map,
+      [stop.lng, stop.lat],
+      {
+        zoom: 13,
+        padding: padding(map, 'stop'),
+        pitch: wantPitch('stop', stop.order),
+        // 2D: 550ms settles inside a 900ms keyboard interval. 3D jumps
+        // immediately — DEM tile work can stall ease frames and moveend
+        // past that interval, which dropped the latest target.
+        duration: reduced || terrain3d ? 0 : 550,
+      },
+      box,
+      gen,
+    )
     return () => {
       cancelled = true
+      box.cleanup?.()
+      box.cleanup = undefined
+      box.current++
     }
-  }, [activeId, mode, trip, terrain3d])
+    // trip is stable for this page; do not depend on its identity.
+  }, [activeId, mode, terrain3d])
 
   // 3D terrain source: attach or detach DEM. Camera motion is owned by the
   // camera effect (terrain3d is in its deps) so this does not start a competing

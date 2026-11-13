@@ -130,12 +130,27 @@ function TripScreen({ trip: t }: { trip: Trip }) {
       if (source === 'click' || source === 'keyboard' || source === 'marker') {
         observeLockRef.current = true
         if (lockTimer.current) clearTimeout(lockTimer.current)
-        lockTimer.current = setTimeout(() => {
-          observeLockRef.current = false
-        }, 900)
         const root = scrollRef.current
         const el = root?.querySelector<HTMLElement>(`[data-step-id="${id}"]`)
-        el?.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'center' })
+        // Keyboard (and reduced-motion) jump instantly so a 900ms tour is
+        // not fighting a smooth-scroll that outlives the lock. Click can
+        // stay smooth; the lock lasts until scrollend (min 1200ms).
+        const instant = source === 'keyboard' || prefersReducedMotion()
+        el?.scrollIntoView({ behavior: instant ? 'auto' : 'smooth', block: 'center' })
+        const lockedAt = Date.now()
+        const unlock = () => {
+          observeLockRef.current = false
+          root?.removeEventListener('scrollend', onScrollEnd)
+        }
+        const onScrollEnd = () => {
+          // Never release before 1200ms — a 900ms Enter tour must hold
+          // the latest step even when instant scroll fires scrollend immediately.
+          const leftover = Math.max(120, 1200 - (Date.now() - lockedAt))
+          if (lockTimer.current) clearTimeout(lockTimer.current)
+          lockTimer.current = setTimeout(unlock, leftover)
+        }
+        root?.addEventListener('scrollend', onScrollEnd, { once: true })
+        lockTimer.current = setTimeout(unlock, 2000)
       }
     },
     [],

@@ -18,8 +18,16 @@ export function Timeline({ stops, activeId, onSelect, scrollRootRef, observeLock
     const root = scrollRootRef.current
     if (!root) return
 
+    // Arm only on a real user gesture. Programmatic scrollIntoView,
+    // focus-scroll, and IntersectionObserver callbacks after a keyboard
+    // select must not steal the step the user just asked for.
+    let userArmedUntil = 0
+    const armUser = () => {
+      userArmedUntil = Date.now() + 400
+    }
     const update = () => {
       if (observeLockRef.current) return
+      if (Date.now() > userArmedUntil) return
       const buttons = stops
         .map((s) => itemRefs.current.get(s.id))
         .filter((el): el is HTMLButtonElement => !!el)
@@ -56,9 +64,15 @@ export function Timeline({ stops, activeId, onSelect, scrollRootRef, observeLock
       if (el) io.observe(el)
     }
     root.addEventListener('scroll', update, { passive: true })
+    root.addEventListener('wheel', armUser, { passive: true })
+    root.addEventListener('touchmove', armUser, { passive: true })
+    root.addEventListener('pointerdown', armUser)
     return () => {
       io.disconnect()
       root.removeEventListener('scroll', update)
+      root.removeEventListener('wheel', armUser)
+      root.removeEventListener('touchmove', armUser)
+      root.removeEventListener('pointerdown', armUser)
     }
   }, [stops, activeId, onSelect, scrollRootRef, observeLockRef])
 
@@ -69,6 +83,14 @@ export function Timeline({ stops, activeId, onSelect, scrollRootRef, observeLock
       const id = stops[next].id
       itemRefs.current.get(id)?.focus()
       onSelect(id, 'keyboard')
+      return
+    }
+    // Enter / Space go through the same onSelect path as click (which drives
+    // the same MapView camera function). preventDefault so the native click
+    // does not fire a second select.
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      onSelect(stops[index].id, 'keyboard')
     }
   }
 
